@@ -7,7 +7,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 
-const hostname = '127.0.0.1';
+const hostname = '0.0.0.0';
 const port = process.env.PORT || 4000;
 
 app.use(cors());
@@ -1513,7 +1513,6 @@ app.use((error, req, res, next) => {
   });
 });
 
-// เริ่มเซิร์ฟเวอร์
-app.listen(port, hostname, () => {
-  console.log(`✅ Server running at http://${hostname}:${port}`);
+app.listen(port, '0.0.0.0', () => { // ✅ ถูกต้องแล้ว
+    console.log(`Server running on port ${port}`);
 });
