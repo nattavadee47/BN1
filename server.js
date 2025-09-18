@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 
 const hostname = '127.0.0.1';
-const port = 3000;
+const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -1515,19 +1515,5 @@ app.use((error, req, res, next) => {
 
 // เริ่มเซิร์ฟเวอร์
 app.listen(port, hostname, () => {
-  console.log(`🚀 เซิร์ฟเวอร์ทำงานที่ http://${hostname}:${port}/`);
-  console.log(`📊 ตรวจสอบสถานะที่ http://${hostname}:${port}/health`);
-  console.log(`🧪 ทดสอบ API ที่ http://${hostname}:${port}/test`);
-  console.log(`🗄️ ทดสอบฐานข้อมูลที่ http://${hostname}:${port}/test-db`);
-  console.log('🔗 API Endpoints:');
-  console.log('   - POST /api/auth/register (สมัครสมาชิก)');
-  console.log('   - POST /api/auth/login (เข้าสู่ระบบ)');
-  console.log('   - GET /api/users/:id (ดูโปรไฟล์)');
-  console.log('   - PUT /api/users/:id (แก้ไขโปรไฟล์)');
-  console.log('   - GET /api/patients (ดูข้อมูลผู้ป่วย)');
-  console.log('   - GET /api/exercise-sessions (ดูประวัติการออกกำลังกาย)');
-  console.log('   - POST /api/exercise-sessions (บันทึกผลการออกกำลังกาย)');
-  console.log('   - GET /api/exercise-stats (ดูสถิติการออกกำลังกาย)');
-  console.log('   - GET /api/stats/registration (สถิติการลงทะเบียน - Admin only)');
-  console.log('========================================');
+  console.log(`✅ Server running at http://${hostname}:${port}`);
 });
