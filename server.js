@@ -64,12 +64,12 @@ app.get('/health', (req, res) => {
 
 // เข้าสู่ระบบ
 app.post('/api/auth/login', async (req, res) => {
-  const connection = await createConnection();
+  let connection;
   
   try {
     const { phone, password } = req.body;
     
-    console.log('🔍 Login attempt:', { phone, hasPassword: !!password });
+    console.log('🔐 Login attempt:', { phone, hasPassword: !!password });
     
     if (!phone || !password) {
       return res.status(400).json({
@@ -78,15 +78,22 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    // ค้นหาผู้ใช้จากเบอร์โทรศัพท์
+    if (!/^[0-9]{10}$/.test(phone)) {
+      return res.status(400).json({
+        success: false,
+        message: 'รูปแบบเบอร์โทรศัพท์ไม่ถูกต้อง (ต้องเป็นตัวเลข 10 หลัก)'
+      });
+    }
+
+    connection = await createConnection();
+    
     const [users] = await connection.execute(
       'SELECT user_id, phone, password_hash, full_name, role FROM Users WHERE phone = ?',
       [phone]
     );
 
-    console.log('🔍 User search result:', users.length > 0 ? 'Found user' : 'User not found');
-
     if (users.length === 0) {
+      await connection.end();
       return res.status(401).json({
         success: false,
         message: 'เบอร์โทรศัพท์หรือรหัสผ่านไม่ถูกต้อง'
@@ -96,15 +103,27 @@ app.post('/api/auth/login', async (req, res) => {
     const user = users[0];
     
     // ตรวจสอบรหัสผ่าน
-    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    let isValidPassword = false;
+    try {
+      isValidPassword = await bcrypt.compare(password, user.password_hash);
+    } catch (bcryptError) {
+      console.error('❌ Bcrypt error:', bcryptError);
+      await connection.end();
+      return res.status(500).json({
+        success: false,
+        message: 'เกิดข้อผิดพลาดในการตรวจสอบรหัสผ่าน'
+      });
+    }
     
     if (!isValidPassword) {
-      // บันทึกการเข้าสู่ระบบล้มเหลว
-      await connection.execute(
-        'INSERT INTO Login_History (user_id, ip_address, status) VALUES (?, ?, ?)',
-        [user.user_id, req.ip, 'Failed']
-      );
+      try {
+        await connection.execute(
+          'INSERT INTO Login_History (user_id, ip_address, status) VALUES (?, ?, ?)',
+          [user.user_id, req.ip || '0.0.0.0', 'Failed']
+        );
+      } catch (e) {}
       
+      await connection.end();
       return res.status(401).json({
         success: false,
         message: 'เบอร์โทรศัพท์หรือรหัสผ่านไม่ถูกต้อง'
@@ -116,19 +135,21 @@ app.post('/api/auth/login', async (req, res) => {
       { 
         user_id: user.user_id, 
         phone: user.phone, 
-        role: user.role 
+        role: normalizeEnumValue(user.role, 'role') || user.role
       },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
 
-    // บันทึกการเข้าสู่ระบบสำเร็จ
-    await connection.execute(
-      'INSERT INTO Login_History (user_id, ip_address, status) VALUES (?, ?, ?)',
-      [user.user_id, req.ip, 'Success']
-    );
+    // บันทึก login success
+    try {
+      await connection.execute(
+        'INSERT INTO Login_History (user_id, ip_address, status) VALUES (?, ?, ?)',
+        [user.user_id, req.ip || '0.0.0.0', 'Success']
+      );
+    } catch (e) {}
 
-    console.log('✅ Login successful for user:', user.phone);
+    console.log('✅ Login successful:', user.phone);
 
     res.json({
       success: true,
@@ -137,22 +158,26 @@ app.post('/api/auth/login', async (req, res) => {
         user_id: user.user_id,
         phone: user.phone,
         full_name: user.full_name,
-        role: user.role
+        role: normalizeEnumValue(user.role, 'role') || user.role
       },
       token: token
     });
 
   } catch (error) {
-    console.error('ข้อผิดพลาดในการเข้าสู่ระบบ:', error);
+    console.error('❌ Login error:', error);
     res.status(500).json({
       success: false,
-      message: 'เกิดข้อผิดพลาดในการเข้าสู่ระบบ'
+      message: 'เกิดข้อผิดพลาดในการเข้าสู่ระบบ',
+      debug: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   } finally {
-    await connection.end();
+    if (connection) {
+      try {
+        await connection.end();
+      } catch (e) {}
+    }
   }
 });
-
 // ลงทะเบียนผู้ใช้ใหม่ - แก้ไขให้รองรับภาษาไทย
 // แทนที่ API POST /api/auth/register ใน server.js ด้วยโค้ดนี้
 app.post('/api/auth/register', async (req, res) => {
@@ -408,26 +433,51 @@ app.post('/api/auth/logout', authenticateToken, (req, res) => {
   });
 });
 
-// ฟังก์ชันตรวจสอบค่า ENUM ที่ถูกต้องสำหรับภาษาไทย - อัพเดทให้ตรงกับ Database Schema
-function validateThaiEnumValues(data) {
-  const errors = [];
+// ฟังก์ชันแปลงค่าภาษาไทย-อังกฤษ (เพิ่มหลัง const createConnection)
+function normalizeEnumValue(value, type) {
+  if (!value) return null;
   
-  // ตรวจสอบ gender
-  if (data.gender && !['ชาย', 'หญิง', 'อื่นๆ', 'Male', 'Female', 'Other'].includes(data.gender)) {
-    errors.push(`เพศไม่ถูกต้อง: ${data.gender}. ต้องเป็น: ชาย, หญิง, หรือ อื่นๆ`);
-  }
+  const mappings = {
+    role: {
+      'ผู้ป่วย': 'Patient',
+      'Patient': 'Patient',
+      'นักกายภาพบำบัด': 'Physiotherapist',
+      'Physiotherapist': 'Physiotherapist',
+      'ผู้ดูแล': 'Caregiver',
+      'Caregiver': 'Caregiver',
+      'Admin': 'Admin'
+    },
+    gender: {
+      'ชาย': 'Male',
+      'Male': 'Male',
+      'หญิง': 'Female',
+      'Female': 'Female',
+      'อื่นๆ': 'Other',
+      'Other': 'Other'
+    },
+    injured_side: {
+      'ซ้าย': 'Left',
+      'Left': 'Left',
+      'ขวา': 'Right',
+      'Right': 'Right',
+      'ทั้งสองข้าง': 'Both',
+      'Both': 'Both'
+    },
+    injured_part: {
+      'แขน': 'Arm',
+      'Arm': 'Arm',
+      'ขา': 'Leg',
+      'Leg': 'Leg',
+      'ลำตัว': 'Trunk',
+      'Trunk': 'Trunk',
+      'หัว': 'Head',
+      'Head': 'Head',
+      'อื่นๆ': 'Other',
+      'Other': 'Other'
+    }
+  };
   
-  // ตรวจสอบ injured_side
-  if (data.injured_side && !['ซ้าย', 'ขวา', 'ทั้งสองข้าง', 'Left', 'Right', 'Both'].includes(data.injured_side)) {
-    errors.push(`ด้านที่บาดเจ็บไม่ถูกต้อง: ${data.injured_side}. ต้องเป็น: ซ้าย, ขวา, หรือ ทั้งสองข้าง`);
-  }
-  
-  // ตรวจสอบ injured_part
-  if (data.injured_part && !['แขน', 'ขา', 'ลำตัว', 'หัว', 'อื่นๆ', 'Arm', 'Leg', 'Trunk', 'Head', 'Other'].includes(data.injured_part)) {
-    errors.push(`ส่วนที่บาดเจ็บไม่ถูกต้อง: ${data.injured_part}. ต้องเป็น: แขน, ขา, ลำตัว, หัว, หรือ อื่นๆ`);
-  }
-  
-  return errors;
+  return mappings[type]?.[value] || value;
 }
 
 // ========================
@@ -467,11 +517,21 @@ app.get('/api/users', authenticateToken, async (req, res) => {
 // ดูโปรไฟล์ผู้ใช้
 app.get('/api/users/:id', authenticateToken, async (req, res) => {
   const connection = await createConnection();
-  const userId = req.params.id;
+  const userId = parseInt(req.params.id);
   
   try {
-    // ตรวจสอบสิทธิ์ - ผู้ใช้สามารถดูข้อมูลตัวเองหรือผู้ดูแลระบบดูได้ทั้งหมด
-    if (req.user.user_id != userId && req.user.role !== 'Admin') {
+    // แปลงทั้งสองฝั่งเป็น Number แล้วเปรียบเทียบ
+    const tokenUserId = Number(req.user.user_id);
+    const requestedUserId = Number(userId);
+    
+    console.log('Authorization Debug:', {
+      tokenUserId,
+      requestedUserId,
+      areEqual: tokenUserId === requestedUserId,
+      role: req.user.role
+    });
+
+    if (tokenUserId !== requestedUserId && req.user.role !== 'Admin') {
       return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
     }
 
@@ -490,23 +550,27 @@ app.get('/api/users/:id', authenticateToken, async (req, res) => {
     const user = users[0];
     let profileData = { ...user };
 
-    // ดึงข้อมูลเพิ่มเติมตามบทบาท
     if (user.role === 'Patient' || user.role === 'ผู้ป่วย') {
-      const [patients] = await connection.execute(`
-        SELECT * FROM Patients WHERE user_id = ?
-      `, [userId]);
+      const [patients] = await connection.execute(
+        'SELECT * FROM Patients WHERE user_id = ?',
+        [userId]
+      );
       profileData.patient_info = patients[0] || null;
     } else if (user.role === 'Physiotherapist' || user.role === 'นักกายภาพบำบัด') {
-      const [physios] = await connection.execute(`
-        SELECT * FROM Physiotherapists WHERE user_id = ?
-      `, [userId]);
+      const [physios] = await connection.execute(
+        'SELECT * FROM Physiotherapists WHERE user_id = ?',
+        [userId]
+      );
       profileData.physiotherapist_info = physios[0] || null;
     } else if (user.role === 'Caregiver' || user.role === 'ผู้ดูแล') {
-      const [caregivers] = await connection.execute(`
-        SELECT * FROM Caregivers WHERE user_id = ?
-      `, [userId]);
+      const [caregivers] = await connection.execute(
+        'SELECT * FROM Caregivers WHERE user_id = ?',
+        [userId]
+      );
       profileData.caregiver_info = caregivers[0] || null;
     }
+
+    console.log('Profile loaded successfully for user:', userId);
 
     res.json({
       success: true,
@@ -514,7 +578,7 @@ app.get('/api/users/:id', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('ข้อผิดพลาดในการดึงโปรไฟล์:', error);
+    console.error('Error loading profile:', error);
     res.status(500).json({
       success: false,
       message: 'เกิดข้อผิดพลาดในการดึงข้อมูลโปรไฟล์'
@@ -526,14 +590,13 @@ app.get('/api/users/:id', authenticateToken, async (req, res) => {
 
 app.put('/api/users/:id', authenticateToken, async (req, res) => {
   const connection = await createConnection();
-  const userId = req.params.id;
+  const userId = parseInt(req.params.id);
   
   try {
-    console.log('🔄 Update profile request for user:', userId);
-    console.log('Request data:', JSON.stringify(req.body, null, 2));
-
-    // ตรวจสอบสิทธิ์
-    if (req.user.user_id != userId && req.user.role !== 'Admin') {
+    const tokenUserId = Number(req.user.user_id);
+    const requestedUserId = Number(userId);
+    
+    if (tokenUserId !== requestedUserId && req.user.role !== 'Admin') {
       return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
     }
 
@@ -865,11 +928,13 @@ app.delete('/api/users/:id', authenticateToken, async (req, res) => {
 // เปลี่ยนรหัสผ่าน
 app.post('/api/users/:id/change-password', authenticateToken, async (req, res) => {
   const connection = await createConnection();
-  const userId = req.params.id;
+  const userId = parseInt(req.params.id);
   
   try {
-    // ตรวจสอบสิทธิ์
-    if (req.user.user_id != userId && req.user.role !== 'Admin') {
+    const tokenUserId = Number(req.user.user_id);
+    const requestedUserId = Number(userId);
+    
+    if (tokenUserId !== requestedUserId && req.user.role !== 'Admin') {
       return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
     }
 
