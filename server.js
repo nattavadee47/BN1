@@ -10,7 +10,10 @@ const path = require('path');
 const hostname = '0.0.0.0';
 const port = process.env.PORT || 4000;
 
-app.use(cors());
+app.use(cors({
+    origin: '*', // หรือระบุ domain ที่ชัดเจน
+    credentials: true
+}));
 app.use(bodyParser.json());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -132,14 +135,14 @@ app.post('/api/auth/login', async (req, res) => {
 
     // สร้าง JWT Token
     const token = jwt.sign(
-      { 
-        user_id: user.user_id, 
-        phone: user.phone, 
-        role: normalizeEnumValue(user.role, 'role') || user.role
-      },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+  { 
+    user_id: parseInt(user.user_id), // ✅ ต้องมี parseInt
+    phone: user.phone, 
+    role: normalizeEnumValue(user.role, 'role') || user.role
+  },
+  JWT_SECRET,
+  { expiresIn: '24h' }
+);
 
     // บันทึก login success
     try {
@@ -354,14 +357,14 @@ app.post('/api/auth/register', async (req, res) => {
 
       // สร้าง JWT Token สำหรับผู้ใช้ใหม่
       const token = jwt.sign(
-        { 
-          user_id: user_id, 
-          phone: phone, 
-          role: role 
-        },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
+  { 
+    user_id: parseInt(user_id), // ✅ ต้องมี parseInt
+    phone: phone, 
+    role: role 
+  },
+  JWT_SECRET,
+  { expiresIn: '24h' }
+);
 
       // บันทึกการสมัครสมาชิกสำเร็จในประวัติ
       try {
@@ -520,18 +523,22 @@ app.get('/api/users/:id', authenticateToken, async (req, res) => {
   const userId = parseInt(req.params.id);
   
   try {
-    // แปลงทั้งสองฝั่งเป็น Number แล้วเปรียบเทียบ
-    const tokenUserId = Number(req.user.user_id);
-    const requestedUserId = Number(userId);
+    // แปลงทั้งสองค่าเป็น Number อย่างชัดเจน
+    const tokenUserId = parseInt(req.user.user_id);
+    const requestedUserId = parseInt(userId);
     
     console.log('Authorization Debug:', {
       tokenUserId,
+      tokenUserIdType: typeof tokenUserId,
       requestedUserId,
+      requestedUserIdType: typeof requestedUserId,
       areEqual: tokenUserId === requestedUserId,
       role: req.user.role
     });
 
+    // เปรียบเทียบหลังจาก parseInt แล้ว
     if (tokenUserId !== requestedUserId && req.user.role !== 'Admin') {
+      console.log('❌ Authorization failed');
       return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
     }
 
@@ -570,7 +577,7 @@ app.get('/api/users/:id', authenticateToken, async (req, res) => {
       profileData.caregiver_info = caregivers[0] || null;
     }
 
-    console.log('Profile loaded successfully for user:', userId);
+    console.log('✅ Profile loaded successfully for user:', userId);
 
     res.json({
       success: true,
@@ -593,8 +600,8 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
   const userId = parseInt(req.params.id);
   
   try {
-    const tokenUserId = Number(req.user.user_id);
-    const requestedUserId = Number(userId);
+    const tokenUserId = parseInt(req.user.user_id);
+    const requestedUserId = parseInt(userId);
     
     if (tokenUserId !== requestedUserId && req.user.role !== 'Admin') {
       return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
@@ -1220,119 +1227,172 @@ app.get('/api/exercises', authenticateToken, async (req, res) => {
 
 // บันทึกผลการออกกำลังกาย
 app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
-  const connection = await createConnection();
-  
-  try {
-    const {
-      exercise_type,
-      exercise_name,
-      actual_reps,
-      target_reps,
-      accuracy_percent,
-      session_duration,
-      notes
-    } = req.body;
+    const connection = await createConnection();
 
-    console.log('🔍 Saving exercise session:', {
-      user_id: req.user.user_id,
-      exercise_type,
-      exercise_name,
-      actual_reps,
-      accuracy_percent
-    });
+    try {
+        const {
+            exercise_type,
+            exercise_name,
+            actual_reps,
+            target_reps,
+            accuracy_percent,
+            session_duration,
+            notes
+        } = req.body;
 
-    // หาข้อมูลผู้ป่วยจาก user_id
-    const [patients] = await connection.execute(
-      'SELECT patient_id FROM Patients WHERE user_id = ?',
-      [req.user.user_id]
-    );
+        console.log('📥 Received data:', {
+            exercise_type,
+            exercise_name,
+            actual_reps,
+            target_reps,
+            accuracy_percent,
+            user_id: req.user.user_id
+        });
 
-    if (patients.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'ไม่พบข้อมูลผู้ป่วย'
-      });
+        // 1. หา patient_id
+        const [patients] = await connection.execute(
+            'SELECT patient_id FROM Patients WHERE user_id = ?',
+            [req.user.user_id]
+        );
+
+        if (patients.length === 0) {
+            console.error('❌ Patient not found for user_id:', req.user.user_id);
+            return res.status(404).json({
+                success: false,
+                message: 'ไม่พบข้อมูลผู้ป่วย'
+            });
+        }
+
+        const patientId = patients[0].patient_id;
+        console.log('✅ Patient ID:', patientId);
+
+        // 2. หาหรือสร้าง Exercise
+        let exerciseId = null;
+        const [existingExercises] = await connection.execute(
+            'SELECT exercise_id FROM Exercises WHERE name_en = ? OR name_th = ?',
+            [exercise_type, exercise_name]
+        );
+
+        if (existingExercises.length > 0) {
+            exerciseId = existingExercises[0].exercise_id;
+            console.log('✅ Found existing exercise:', exerciseId);
+        } else {
+            const [exerciseResult] = await connection.execute(
+                'INSERT INTO Exercises (name_th, name_en, description) VALUES (?, ?, ?)',
+                [exercise_name, exercise_type, `Auto-created: ${exercise_name}`]
+            );
+            exerciseId = exerciseResult.insertId;
+            console.log('✅ Created new exercise:', exerciseId);
+        }
+
+        // 3. หาหรือสร้าง Exercise Plan
+        let planId = null;
+        
+        // ตรวจสอบว่ามี physio_id = 1 หรือไม่
+        const [physios] = await connection.execute(
+            'SELECT physio_id FROM Physiotherapists LIMIT 1'
+        );
+        
+        const defaultPhysioId = physios.length > 0 ? physios[0].physio_id : null;
+        
+        if (!defaultPhysioId) {
+            console.error('❌ No physiotherapist found in database');
+            return res.status(500).json({
+                success: false,
+                message: 'ไม่พบข้อมูลนักกายภาพบำบัดในระบบ กรุณาติดต่อผู้ดูแล'
+            });
+        }
+
+        const [existingPlans] = await connection.execute(
+            `SELECT plan_id FROM ExercisePlans 
+             WHERE patient_id = ? AND (end_date IS NULL OR end_date >= CURDATE())
+             ORDER BY plan_id DESC LIMIT 1`,
+            [patientId]
+        );
+
+        if (existingPlans.length > 0) {
+            planId = existingPlans[0].plan_id;
+            console.log('✅ Found existing plan:', planId);
+        } else {
+            const [planResult] = await connection.execute(
+                `INSERT INTO ExercisePlans (patient_id, physio_id, plan_name, start_date) 
+                 VALUES (?, ?, 'Auto Plan', CURDATE())`,
+                [patientId, defaultPhysioId]
+            );
+            planId = planResult.insertId;
+            console.log('✅ Created new plan:', planId);
+        }
+
+        const actual_sets = 1;
+
+        // 4. บันทึก Session - ตรวจสอบว่า column มีหรือไม่
+        console.log('💾 Attempting to save session...');
+        
+        try {
+            const [sessionResult] = await connection.execute(
+                `INSERT INTO Exercise_Sessions 
+                 (patient_id, plan_id, exercise_id, actual_reps, actual_sets, target_reps, accuracy_percent, notes) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [patientId, planId, exerciseId, actual_reps, actual_sets, target_reps, accuracy_percent, notes || '']
+            );
+
+            console.log('✅ Session saved with ID:', sessionResult.insertId);
+
+            res.status(201).json({
+                success: true,
+                message: 'บันทึกผลการออกกำลังกายสำเร็จ',
+                data: {
+                    session_id: sessionResult.insertId,
+                    patient_id: patientId,
+                    exercise_id: exerciseId,
+                    plan_id: planId
+                }
+            });
+            
+        } catch (insertError) {
+            console.error('❌ Error inserting session:', insertError);
+            
+            // ลอง INSERT โดยไม่มี target_reps และ actual_sets
+            console.log('⚠️ Retrying without target_reps and actual_sets...');
+            
+            const [sessionResult] = await connection.execute(
+                `INSERT INTO Exercise_Sessions 
+                 (patient_id, plan_id, exercise_id, actual_reps, accuracy_percent, notes) 
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [patientId, planId, exerciseId, actual_reps, accuracy_percent, notes || '']
+            );
+
+            console.log('✅ Session saved (fallback) with ID:', sessionResult.insertId);
+
+            res.status(201).json({
+                success: true,
+                message: 'บันทึกผลการออกกำลังกายสำเร็จ',
+                data: {
+                    session_id: sessionResult.insertId,
+                    patient_id: patientId,
+                    exercise_id: exerciseId,
+                    plan_id: planId
+                }
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ Error saving exercise session:', error);
+        console.error('Error details:', {
+            code: error.code,
+            sqlMessage: error.sqlMessage,
+            sql: error.sql
+        });
+        
+        res.status(500).json({
+            success: false,
+            message: 'เกิดข้อผิดพลาดในการบันทึกผลการออกกำลังกาย',
+            error_code: error.code,
+            error_details: process.env.NODE_ENV === 'development' ? error.sqlMessage : undefined
+        });
+    } finally {
+        await connection.end();
     }
-
-    const patientId = patients[0].patient_id;
-
-    // หาหรือสร้าง Exercise record
-    let exerciseId = null;
-    const [existingExercises] = await connection.execute(
-      'SELECT exercise_id FROM Exercises WHERE name_en = ? OR name_th = ?',
-      [exercise_type, exercise_name]
-    );
-
-    if (existingExercises.length > 0) {
-      exerciseId = existingExercises[0].exercise_id;
-    } else {
-      // สร้าง exercise ใหม่
-      const [exerciseResult] = await connection.execute(
-        'INSERT INTO Exercises (name_th, name_en, description) VALUES (?, ?, ?)',
-        [exercise_name, exercise_type, `Auto-created from session: ${exercise_name}`]
-      );
-      exerciseId = exerciseResult.insertId;
-    }
-
-    // หาหรือสร้าง Exercise Plan
-    let planId = null;
-    const [existingPlans] = await connection.execute(
-      `SELECT plan_id FROM ExercisePlans 
-       WHERE patient_id = ? AND (end_date IS NULL OR end_date >= CURDATE())
-       ORDER BY plan_id DESC LIMIT 1`,
-      [patientId]
-    );
-
-    if (existingPlans.length > 0) {
-      planId = existingPlans[0].plan_id;
-    } else {
-      // สร้าง plan ใหม่
-      const [planResult] = await connection.execute(
-        `INSERT INTO ExercisePlans (patient_id, physio_id, plan_name, start_date) 
-         VALUES (?, 1, 'Auto Plan', CURDATE())`,
-        [patientId]
-      );
-      planId = planResult.insertId;
-    }
-
-    // บันทึก Exercise Session
-    const [sessionResult] = await connection.execute(
-      `INSERT INTO Exercise_Sessions 
-       (patient_id, plan_id, exercise_id, actual_reps, accuracy_percent, notes) 
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        patientId,
-        planId,
-        exerciseId,
-        actual_reps,
-        accuracy_percent,
-        notes || `Session completed with ${actual_reps} reps, ${accuracy_percent}% accuracy`
-      ]
-    );
-
-    console.log('✅ Exercise session saved with ID:', sessionResult.insertId);
-
-    res.status(201).json({
-      success: true,
-      message: 'บันทึกผลการออกกำลังกายสำเร็จ',
-      data: {
-        session_id: sessionResult.insertId,
-        patient_id: patientId,
-        exercise_id: exerciseId,
-        plan_id: planId
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Error saving exercise session:', error);
-    res.status(500).json({
-      success: false,
-      message: 'เกิดข้อผิดพลาดในการบันทึกผลการออกกำลังกาย',
-      error_details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  } finally {
-    await connection.end();
-  }
 });
 
 // ดึงประวัติการออกกำลังกายโดยไม่ระบุ patientId (ใช้ user_id จาก token)
