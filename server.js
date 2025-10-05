@@ -21,22 +21,52 @@ app.use(express.static(path.join(__dirname, 'public')));
 const JWT_SECRET = 'stroke_rehab_secret_key_2024';
 
 const createConnection = async () => {
-  return await mysql.createConnection({
+  const connection = await mysql.createConnection({
     host: 'gateway01.ap-northeast-1.prod.aws.tidbcloud.com',
     user: '3HZNLzyS4E2dJfG.root',
     password: '1CmpzXSMTQxYdngG',
     database: 'stroke_rehab_db',
-    ssl: { minVersion: 'TLSv1.2' }
+    ssl: { minVersion: 'TLSv1.2' },
+    timezone: '+07:00'
   });
+  
+  // ตั้งค่า timezone สำหรับ session
+  await connection.execute("SET time_zone = '+07:00'");
+  
+  return connection;
 };
 
 // Middleware JWT
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ success: false, message: 'ต้องระบุ Access token' });
+  
+  if (!token) {
+    return res.status(401).json({ 
+      success: false, 
+      message: 'ต้องระบุ Access token' 
+    });
+  }
+  
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ success: false, message: 'Token ไม่ถูกต้อง' });
+    if (err) {
+      console.error('❌ Token verification failed:', err.message);
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Token ไม่ถูกต้อง' 
+      });
+    }
+    
+    // ✅ ตรวจสอบว่า user_id เป็น number
+    if (user.user_id) {
+      user.user_id = parseInt(user.user_id);
+    }
+    
+    console.log('✅ Token verified:', { 
+      user_id: user.user_id, 
+      role: user.role 
+    });
+    
     req.user = user;
     next();
   });
@@ -72,7 +102,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { phone, password } = req.body;
     
-    console.log('🔐 Login attempt:', { phone, hasPassword: !!password });
+    console.log('🔍 Login attempt:', { phone, hasPassword: !!password });
     
     if (!phone || !password) {
       return res.status(400).json({
@@ -133,16 +163,16 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    // สร้าง JWT Token
+    // ✅ สร้าง JWT Token พร้อม parseInt
     const token = jwt.sign(
-  { 
-    user_id: parseInt(user.user_id), // ✅ ต้องมี parseInt
-    phone: user.phone, 
-    role: normalizeEnumValue(user.role, 'role') || user.role
-  },
-  JWT_SECRET,
-  { expiresIn: '24h' }
-);
+      { 
+        user_id: parseInt(user.user_id), // ✅ ต้องมี parseInt
+        phone: user.phone, 
+        role: user.role // ✅ ใช้ role จาก database ตรงๆ
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
 
     // บันทึก login success
     try {
@@ -152,16 +182,20 @@ app.post('/api/auth/login', async (req, res) => {
       );
     } catch (e) {}
 
-    console.log('✅ Login successful:', user.phone);
+    console.log('✅ Login successful:', { 
+      phone: user.phone, 
+      role: user.role,
+      user_id: user.user_id 
+    });
 
     res.json({
       success: true,
       message: 'เข้าสู่ระบบสำเร็จ',
       user: {
-        user_id: user.user_id,
+        user_id: parseInt(user.user_id), // ✅ ส่งเป็น number
         phone: user.phone,
         full_name: user.full_name,
-        role: normalizeEnumValue(user.role, 'role') || user.role
+        role: user.role // ✅ ส่ง role ตรงจาก DB
       },
       token: token
     });
@@ -489,7 +523,7 @@ function normalizeEnumValue(value, type) {
 
 // ดูรายชื่อผู้ใช้ทั้งหมด (เฉพาะผู้ดูแลระบบ)
 app.get('/api/users', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'Admin') {
+  if (!isAdmin(req.user.role)) {
     return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
   }
 
@@ -523,21 +557,10 @@ app.get('/api/users/:id', authenticateToken, async (req, res) => {
   const userId = parseInt(req.params.id);
   
   try {
-    // แปลงทั้งสองค่าเป็น Number อย่างชัดเจน
     const tokenUserId = parseInt(req.user.user_id);
     const requestedUserId = parseInt(userId);
     
-    console.log('Authorization Debug:', {
-      tokenUserId,
-      tokenUserIdType: typeof tokenUserId,
-      requestedUserId,
-      requestedUserIdType: typeof requestedUserId,
-      areEqual: tokenUserId === requestedUserId,
-      role: req.user.role
-    });
-
-    // เปรียบเทียบหลังจาก parseInt แล้ว
-    if (tokenUserId !== requestedUserId && req.user.role !== 'Admin') {
+    if (tokenUserId !== requestedUserId && !isAdmin(req.user.role)) {
       console.log('❌ Authorization failed');
       return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
     }
@@ -603,7 +626,7 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
     const tokenUserId = parseInt(req.user.user_id);
     const requestedUserId = parseInt(userId);
     
-    if (tokenUserId !== requestedUserId && req.user.role !== 'Admin') {
+    if (tokenUserId !== requestedUserId && !isAdmin(req.user.role)) {
       return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
     }
 
@@ -889,7 +912,7 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
 
 // ลบผู้ใช้ (เฉพาะผู้ดูแลระบบ)
 app.delete('/api/users/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'Admin') {
+  if (!isAdmin(req.user.role)) {
     return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
   }
 
@@ -941,7 +964,7 @@ app.post('/api/users/:id/change-password', authenticateToken, async (req, res) =
     const tokenUserId = Number(req.user.user_id);
     const requestedUserId = Number(userId);
     
-    if (tokenUserId !== requestedUserId && req.user.role !== 'Admin') {
+    if (tokenUserId !== requestedUserId && !isAdmin(req.user.role)) {
       return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
     }
 
@@ -955,7 +978,7 @@ app.post('/api/users/:id/change-password', authenticateToken, async (req, res) =
     }
 
     // หากไม่ใช่ Admin ต้องตรวจสอบรหัสผ่านเดิม
-    if (req.user.role !== 'Admin') {
+    if (!isAdmin(req.user.role)) {
       if (!currentPassword) {
         return res.status(400).json({
           success: false,
@@ -1149,10 +1172,9 @@ app.get('/test-db', async (req, res) => {
 
 // ดูสถิติการลงทะเบียน
 app.get('/api/stats/registration', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'Admin') {
+  if (!isAdmin(req.user.role)) {
     return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
   }
-
   const connection = await createConnection();
   
   try {
@@ -1233,165 +1255,160 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
         const {
             exercise_type,
             exercise_name,
-            actual_reps,
-            target_reps,
+            actual_reps_left,
+            actual_reps_right,
             accuracy_percent,
-            session_duration,
+            duration_seconds,
             notes
         } = req.body;
 
-        console.log('📥 Received data:', {
-            exercise_type,
-            exercise_name,
-            actual_reps,
-            target_reps,
-            accuracy_percent,
-            user_id: req.user.user_id
-        });
+        const total_reps = (parseInt(actual_reps_left) || 0) + (parseInt(actual_reps_right) || 0);
 
-        // 1. หา patient_id
+        console.log('📝 Request body:', req.body);
+
+        // หา patient_id
         const [patients] = await connection.execute(
             'SELECT patient_id FROM Patients WHERE user_id = ?',
             [req.user.user_id]
         );
 
         if (patients.length === 0) {
-            console.error('❌ Patient not found for user_id:', req.user.user_id);
-            return res.status(404).json({
-                success: false,
-                message: 'ไม่พบข้อมูลผู้ป่วย'
+            await connection.end();
+            return res.status(404).json({ 
+                success: false, 
+                message: 'ไม่พบข้อมูลผู้ป่วย' 
             });
         }
-
         const patientId = patients[0].patient_id;
-        console.log('✅ Patient ID:', patientId);
 
-        // 2. หาหรือสร้าง Exercise
+        // หาหรือสร้าง Exercise
         let exerciseId = null;
         const [existingExercises] = await connection.execute(
-            'SELECT exercise_id FROM Exercises WHERE name_en = ? OR name_th = ?',
-            [exercise_type, exercise_name]
+            'SELECT exercise_id FROM Exercises WHERE name_en = ?',
+            [exercise_type]
         );
 
         if (existingExercises.length > 0) {
             exerciseId = existingExercises[0].exercise_id;
-            console.log('✅ Found existing exercise:', exerciseId);
         } else {
             const [exerciseResult] = await connection.execute(
-                'INSERT INTO Exercises (name_th, name_en, description) VALUES (?, ?, ?)',
-                [exercise_name, exercise_type, `Auto-created: ${exercise_name}`]
+                `INSERT INTO Exercises 
+                 (name_th, name_en, description) 
+                 VALUES (?, ?, ?)`,
+                [exercise_name || 'ท่ากายภาพ', exercise_type, `การออกกำลังกาย: ${exercise_name || exercise_type}`]
             );
             exerciseId = exerciseResult.insertId;
-            console.log('✅ Created new exercise:', exerciseId);
         }
 
-        // 3. หาหรือสร้าง Exercise Plan
-        let planId = null;
-        
-        // ตรวจสอบว่ามี physio_id = 1 หรือไม่
+        // หา plan_id
         const [physios] = await connection.execute(
             'SELECT physio_id FROM Physiotherapists LIMIT 1'
         );
         
-        const defaultPhysioId = physios.length > 0 ? physios[0].physio_id : null;
-        
-        if (!defaultPhysioId) {
-            console.error('❌ No physiotherapist found in database');
-            return res.status(500).json({
-                success: false,
-                message: 'ไม่พบข้อมูลนักกายภาพบำบัดในระบบ กรุณาติดต่อผู้ดูแล'
+        if (physios.length === 0) {
+            await connection.end();
+            return res.status(500).json({ 
+                success: false, 
+                message: 'ไม่พบนักกายภาพบำบัด' 
             });
         }
+        const physioId = physios[0].physio_id;
 
+        let planId = null;
         const [existingPlans] = await connection.execute(
             `SELECT plan_id FROM ExercisePlans 
              WHERE patient_id = ? AND (end_date IS NULL OR end_date >= CURDATE())
-             ORDER BY plan_id DESC LIMIT 1`,
+             LIMIT 1`,
             [patientId]
         );
 
         if (existingPlans.length > 0) {
             planId = existingPlans[0].plan_id;
-            console.log('✅ Found existing plan:', planId);
         } else {
             const [planResult] = await connection.execute(
-                `INSERT INTO ExercisePlans (patient_id, physio_id, plan_name, start_date) 
-                 VALUES (?, ?, 'Auto Plan', CURDATE())`,
-                [patientId, defaultPhysioId]
+                `INSERT INTO ExercisePlans 
+                 (patient_id, physio_id, plan_name, start_date, end_date) 
+                 VALUES (?, ?, ?, CURDATE(), DATE_ADD(CURDATE(), INTERVAL 30 DAY))`,
+                [patientId, physioId, 'แผนการฝึกอัตโนมัติ']
             );
             planId = planResult.insertId;
-            console.log('✅ Created new plan:', planId);
         }
 
-        const actual_sets = 1;
+        // เตรียมข้อมูลและตรวจสอบ
+        const insertData = [
+            patientId,
+            planId,
+            exerciseId,
+            total_reps,
+            parseInt(actual_reps_left) || 0,
+            parseInt(actual_reps_right) || 0,
+            parseFloat(accuracy_percent) || 0,
+            parseInt(duration_seconds) || 0,
+            notes ? String(notes) : null
+        ];
 
-        // 4. บันทึก Session - ตรวจสอบว่า column มีหรือไม่
-        console.log('💾 Attempting to save session...');
-        
-        try {
-            const [sessionResult] = await connection.execute(
-                `INSERT INTO Exercise_Sessions 
-                 (patient_id, plan_id, exercise_id, actual_reps, actual_sets, target_reps, accuracy_percent, notes) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                [patientId, planId, exerciseId, actual_reps, actual_sets, target_reps, accuracy_percent, notes || '']
-            );
+        console.log('🔍 Debug values before insert:', {
+            patientId,
+            planId,
+            exerciseId,
+            total_reps,
+            actual_reps_left: parseInt(actual_reps_left) || 0,
+            actual_reps_right: parseInt(actual_reps_right) || 0,
+            accuracy_percent: parseFloat(accuracy_percent) || 0,
+            duration_seconds: parseInt(duration_seconds) || 0,
+            notes: notes ? String(notes) : null
+        });
 
-            console.log('✅ Session saved with ID:', sessionResult.insertId);
-
-            res.status(201).json({
-                success: true,
-                message: 'บันทึกผลการออกกำลังกายสำเร็จ',
-                data: {
-                    session_id: sessionResult.insertId,
-                    patient_id: patientId,
-                    exercise_id: exerciseId,
-                    plan_id: planId
-                }
-            });
-            
-        } catch (insertError) {
-            console.error('❌ Error inserting session:', insertError);
-            
-            // ลอง INSERT โดยไม่มี target_reps และ actual_sets
-            console.log('⚠️ Retrying without target_reps and actual_sets...');
-            
-            const [sessionResult] = await connection.execute(
-                `INSERT INTO Exercise_Sessions 
-                 (patient_id, plan_id, exercise_id, actual_reps, accuracy_percent, notes) 
-                 VALUES (?, ?, ?, ?, ?, ?)`,
-                [patientId, planId, exerciseId, actual_reps, accuracy_percent, notes || '']
-            );
-
-            console.log('✅ Session saved (fallback) with ID:', sessionResult.insertId);
-
-            res.status(201).json({
-                success: true,
-                message: 'บันทึกผลการออกกำลังกายสำเร็จ',
-                data: {
-                    session_id: sessionResult.insertId,
-                    patient_id: patientId,
-                    exercise_id: exerciseId,
-                    plan_id: planId
-                }
+        // ตรวจสอบ undefined
+        if (insertData.includes(undefined)) {
+            console.error('❌ Found undefined:', insertData);
+            await connection.end();
+            return res.status(400).json({
+                success: false,
+                message: 'ข้อมูลไม่ครบถ้วน'
             });
         }
+
+        const [sessionResult] = await connection.execute(
+            `INSERT INTO Exercise_Sessions 
+             (patient_id, plan_id, exercise_id, session_date, 
+              actual_reps, actual_reps_left, actual_reps_right,
+              actual_sets, accuracy_percent, duration_seconds, notes) 
+             VALUES (?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
+            insertData
+        );
+
+        console.log('✅ Saved:', sessionResult.insertId);
+
+        await connection.end();
+
+        res.status(201).json({
+            success: true,
+            message: 'บันทึกสำเร็จ',
+            data: {
+                session_id: sessionResult.insertId,
+                actual_reps_left: parseInt(actual_reps_left) || 0,
+                actual_reps_right: parseInt(actual_reps_right) || 0,
+                total: total_reps,
+                accuracy_percent: parseFloat(accuracy_percent) || 0,
+                duration_seconds: parseInt(duration_seconds) || 0
+            }
+        });
 
     } catch (error) {
-        console.error('❌ Error saving exercise session:', error);
-        console.error('Error details:', {
-            code: error.code,
-            sqlMessage: error.sqlMessage,
-            sql: error.sql
-        });
+        console.error('❌ Error:', error.message);
         
-        res.status(500).json({
-            success: false,
-            message: 'เกิดข้อผิดพลาดในการบันทึกผลการออกกำลังกาย',
-            error_code: error.code,
-            error_details: process.env.NODE_ENV === 'development' ? error.sqlMessage : undefined
+        if (connection) {
+            try {
+                await connection.end();
+            } catch (e) {}
+        }
+        
+        res.status(500).json({ 
+            success: false, 
+            message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล',
+            error: error.message
         });
-    } finally {
-        await connection.end();
     }
 });
 
@@ -1400,31 +1417,36 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
   const connection = await createConnection();
   
   try {
-    // หาข้อมูลผู้ป่วยจาก user_id
     const [patients] = await connection.execute(
       'SELECT patient_id FROM Patients WHERE user_id = ?',
       [req.user.user_id]
     );
     
     if (patients.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'ไม่พบข้อมูลผู้ป่วย'
-      });
+      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้ป่วย' });
     }
     
     const patientId = patients[0].patient_id;
 
-    // ดึงข้อมูลการออกกำลังกาย
+    // ✅ ดึงข้อมูลพร้อม timezone และข้อมูลซ้าย-ขวาครบถ้วน
     const [sessions] = await connection.execute(`
       SELECT 
-        es.*,
+        es.session_id,
+        es.patient_id,
+        es.exercise_id,
+        es.plan_id,
+        CONVERT_TZ(es.session_date, '+00:00', '+07:00') as session_date,
+        es.actual_reps,
+        es.actual_reps_left,
+        es.actual_reps_right,
+        es.actual_sets,
+        es.accuracy_percent,
+        es.duration_seconds,
+        es.notes,
         e.name_th as exercise_name_th,
         e.name_en as exercise_name_en,
         e.description as exercise_description,
-        ep.plan_name,
-        DATE_FORMAT(es.session_date, '%d/%m/%Y') as session_date_thai,
-        TIME_FORMAT(es.session_date, '%H:%i') as session_time
+        ep.plan_name
       FROM Exercise_Sessions es
       JOIN Exercises e ON es.exercise_id = e.exercise_id
       JOIN ExercisePlans ep ON es.plan_id = ep.plan_id
@@ -1433,6 +1455,16 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
       LIMIT 50
     `, [patientId]);
 
+    console.log('✅ Loaded sessions:', {
+      count: sessions.length,
+      sample: sessions[0] ? {
+        left: sessions[0].actual_reps_left,
+        right: sessions[0].actual_reps_right,
+        total: sessions[0].actual_reps,
+        date: sessions[0].session_date
+      } : null
+    });
+
     res.json({
       success: true,
       data: sessions,
@@ -1440,11 +1472,8 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('ข้อผิดพลาดในการดึงประวัติการออกกำลังกาย:', error);
-    res.status(500).json({
-      success: false,
-      message: 'เกิดข้อผิดพลาดในการดึงประวัติการออกกำลังกาย'
-    });
+    console.error('❌ Error:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด' });
   } finally {
     await connection.end();
   }
@@ -1613,7 +1642,460 @@ app.get('/api/exercise-stats/:patientId', authenticateToken, async (req, res) =>
     await connection.end();
   }
 });
+// ========================
+// ADMIN DASHBOARD APIs
+// ========================
 
+// ดึงสถิติ Dashboard
+app.get('/api/admin/dashboard/stats', authenticateToken, async (req, res) => {
+  console.log('📊 Dashboard stats request from:', {
+    user_id: req.user.user_id,
+    role: req.user.role
+  });
+
+  if (!isAdmin(req.user.role)) {
+    return res.status(403).json({ 
+      success: false, 
+      message: 'ไม่มีสิทธิ์เข้าถึง - ต้องการบทบาท Admin',
+      current_role: req.user.role
+    });
+  }
+
+  const connection = await createConnection();
+  
+  try {
+    // นับผู้ใช้ทั้งหมด
+    const [totalUsers] = await connection.execute(
+      'SELECT COUNT(*) as count FROM Users'
+    );
+
+    // นับผู้ป่วยใหม่ (30 วันล่าสุด)
+    const [newPatients] = await connection.execute(
+      `SELECT COUNT(*) as count FROM Users 
+       WHERE role = 'Patient' AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`
+    );
+
+    // นับ sessions ทั้งหมด
+    const [totalSessions] = await connection.execute(
+      'SELECT COUNT(*) as count FROM Exercise_Sessions'
+    );
+
+    console.log('✅ Dashboard stats loaded:', {
+      totalUsers: totalUsers[0].count,
+      newPatients: newPatients[0].count,
+      totalSessions: totalSessions[0].count
+    });
+
+    res.json({
+      success: true,
+      data: {
+        totalUsers: totalUsers[0].count,
+        newPatients: newPatients[0].count,
+        totalSessions: totalSessions[0].count
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error loading dashboard stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการดึงข้อมูลสถิติ',
+      error: error.message
+    });
+  } finally {
+    await connection.end();
+  }
+});
+
+
+// ดูรายชื่อผู้ใช้ทั้งหมด (สำหรับ Admin)
+app.get('/api/admin/users', authenticateToken, async (req, res) => {
+  console.log('👥 Users list request from:', {
+    user_id: req.user.user_id,
+    role: req.user.role
+  });
+
+  if (!isAdmin(req.user.role)) {
+    return res.status(403).json({ 
+      success: false, 
+      message: 'ไม่มีสิทธิ์เข้าถึง',
+      current_role: req.user.role
+    });
+  }
+
+  const connection = await createConnection();
+  
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+
+    const [users] = await connection.execute(`
+      SELECT user_id, phone, full_name, role, created_at, updated_at 
+      FROM Users 
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `, [limit, offset]);
+
+    const [totalCount] = await connection.execute(
+      'SELECT COUNT(*) as total FROM Users'
+    );
+
+    console.log('✅ Users loaded:', {
+      count: users.length,
+      total: totalCount[0].total
+    });
+
+    res.json({
+      success: true,
+      data: users,
+      pagination: {
+        page,
+        limit,
+        total: totalCount[0].total,
+        totalPages: Math.ceil(totalCount[0].total / limit)
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error loading users:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการดึงข้อมูลผู้ใช้',
+      error: error.message
+    });
+  } finally {
+    await connection.end();
+  }
+});
+
+// ดูข้อมูลผู้ใช้รายบุคคล (Admin)
+app.get('/api/admin/users/:id', authenticateToken, async (req, res) => {
+  if (!isAdmin(req.user.role)) {
+    return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
+  }
+  const connection = await createConnection();
+  const userId = parseInt(req.params.id);
+  
+  try {
+    const [users] = await connection.execute(
+      'SELECT user_id, phone, full_name, role, created_at FROM Users WHERE user_id = ?',
+      [userId]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'ไม่พบข้อมูลผู้ใช้'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: users[0]
+    });
+
+  } catch (error) {
+    console.error('Error loading user:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการดึงข้อมูล'
+    });
+  } finally {
+    await connection.end();
+  }
+});
+
+// สร้างผู้ใช้ใหม่ (Admin)
+app.post('/api/admin/users', authenticateToken, async (req, res) => {
+  if (!isAdmin(req.user.role)) {
+    return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
+  }
+
+  const connection = await createConnection();
+  
+  try {
+    const { phone, password, full_name, role } = req.body;
+
+    // ตรวจสอบข้อมูล
+    if (!phone || !password || !full_name || !role) {
+      return res.status(400).json({
+        success: false,
+        message: 'กรุณากรอกข้อมูลให้ครบถ้วน'
+      });
+    }
+
+    // เข้ารหัสรหัสผ่าน
+    const password_hash = await bcrypt.hash(password, 12);
+
+    // เพิ่มผู้ใช้
+    const [result] = await connection.execute(
+      'INSERT INTO Users (phone, password_hash, full_name, role, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())',
+      [phone, password_hash, full_name, role]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'สร้างผู้ใช้สำเร็จ',
+      data: {
+        user_id: result.insertId,
+        phone,
+        full_name,
+        role
+      }
+    });
+
+  } catch (error) {
+    console.error('Error creating user:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการสร้างผู้ใช้'
+    });
+  } finally {
+    await connection.end();
+  }
+});
+
+// แก้ไขผู้ใช้ (Admin)
+app.put('/api/admin/users/:id', authenticateToken, async (req, res) => {
+  if (!isAdmin(req.user.role)) {
+    return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
+  }
+
+  const connection = await createConnection();
+  const userId = parseInt(req.params.id);
+  
+  try {
+    const { phone, full_name, role } = req.body;
+
+    const updates = [];
+    const values = [];
+
+    if (phone) {
+      updates.push('phone = ?');
+      values.push(phone);
+    }
+    if (full_name) {
+      updates.push('full_name = ?');
+      values.push(full_name);
+    }
+    if (role) {
+      updates.push('role = ?');
+      values.push(role);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'ไม่มีข้อมูลที่ต้องการแก้ไข'
+      });
+    }
+
+    updates.push('updated_at = NOW()');
+    values.push(userId);
+
+    await connection.execute(
+      `UPDATE Users SET ${updates.join(', ')} WHERE user_id = ?`,
+      values
+    );
+
+    res.json({
+      success: true,
+      message: 'แก้ไขข้อมูลสำเร็จ'
+    });
+
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล'
+    });
+  } finally {
+    await connection.end();
+  }
+});
+
+// ลบผู้ใช้ (Admin)
+app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
+  if (!isAdmin(req.user.role)) {
+    return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
+  }
+
+  const connection = await createConnection();
+  const userId = parseInt(req.params.id);
+  
+  try {
+    await connection.execute(
+      'DELETE FROM Users WHERE user_id = ?',
+      [userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'ลบผู้ใช้สำเร็จ'
+    });
+
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการลบผู้ใช้'
+    });
+  } finally {
+    await connection.end();
+  }
+});
+// ========================
+// DEBUG ENDPOINTS (ลบออกหลังแก้ปัญหาเสร็จ)
+// ========================
+
+// Debug: ดูข้อมูล Admin ทั้งหมด
+app.get('/api/debug/admins', async (req, res) => {
+  const connection = await createConnection();
+  
+  try {
+    const [admins] = await connection.execute(
+      'SELECT user_id, phone, full_name, role, created_at FROM Users WHERE role = ?',
+      ['Admin']
+    );
+
+    res.json({
+      success: true,
+      count: admins.length,
+      admins: admins.map(admin => ({
+        user_id: admin.user_id,
+        phone: admin.phone,
+        full_name: admin.full_name,
+        role: admin.role,
+        created_at: admin.created_at
+      }))
+    });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  } finally {
+    await connection.end();
+  }
+});
+
+// Debug: สร้าง Admin ทดสอบ
+app.post('/api/debug/create-admin', async (req, res) => {
+  const connection = await createConnection();
+  
+  try {
+    const phone = '0800000000';
+    const password = 'admin123';
+    const full_name = 'Admin Test';
+    
+    // ตรวจสอบว่ามีอยู่แล้วหรือไม่
+    const [existing] = await connection.execute(
+      'SELECT user_id FROM Users WHERE phone = ?',
+      [phone]
+    );
+    
+    if (existing.length > 0) {
+      // อัปเดตรหัสผ่านของ Admin ที่มีอยู่
+      const password_hash = await bcrypt.hash(password, 12);
+      await connection.execute(
+        'UPDATE Users SET password_hash = ?, updated_at = NOW() WHERE phone = ?',
+        [password_hash, phone]
+      );
+      
+      return res.json({
+        success: true,
+        message: 'อัปเดตรหัสผ่าน Admin สำเร็จ',
+        credentials: {
+          phone: phone,
+          password: password,
+          user_id: existing[0].user_id
+        }
+      });
+    }
+    
+    // สร้างใหม่
+    const password_hash = await bcrypt.hash(password, 12);
+    
+    const [result] = await connection.execute(
+      'INSERT INTO Users (phone, password_hash, full_name, role, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())',
+      [phone, password_hash, full_name, 'Admin']
+    );
+
+    res.json({
+      success: true,
+      message: 'สร้าง Admin ทดสอบสำเร็จ',
+      credentials: {
+        phone: phone,
+        password: password,
+        user_id: result.insertId
+      }
+    });
+
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  } finally {
+    await connection.end();
+  }
+});
+
+// Debug: ทดสอบ Token
+app.get('/api/debug/me', authenticateToken, (req, res) => {
+  res.json({
+    success: true,
+    user: {
+      user_id: req.user.user_id,
+      phone: req.user.phone,
+      role: req.user.role,
+      user_id_type: typeof req.user.user_id
+    }
+  });
+});
+
+// Debug: ตรวจสอบรหัสผ่าน
+app.post('/api/debug/check-password', async (req, res) => {
+  const connection = await createConnection();
+  
+  try {
+    const { phone, password } = req.body;
+    
+    const [users] = await connection.execute(
+      'SELECT user_id, phone, password_hash, role FROM Users WHERE phone = ?',
+      [phone]
+    );
+
+    if (users.length === 0) {
+      return res.json({
+        success: false,
+        message: 'ไม่พบเบอร์โทรศัพท์นี้ในระบบ'
+      });
+    }
+
+    const user = users[0];
+    const isValid = await bcrypt.compare(password, user.password_hash);
+
+    res.json({
+      success: true,
+      phone: user.phone,
+      role: user.role,
+      password_match: isValid,
+      hash_preview: user.password_hash.substring(0, 20) + '...'
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  } finally {
+    await connection.end();
+  }
+});
 // จัดการข้อผิดพลาด 404 - แก้ไขปัญหา PathError
 app.use((req, res, next) => {
   res.status(404).json({
