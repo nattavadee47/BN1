@@ -1361,12 +1361,13 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
 
         // ✅ บันทึก Session พร้อมเวลาไทย
         // ✅ โค้ดใหม่ - บันทึกเวลาไทยแล้วแปลงเป็น UTC
-            const [sessionResult] = await connection.execute(
-                `INSERT INTO Exercise_Sessions 
-                (patient_id, plan_id, exercise_id, session_date, 
-                  actual_reps, actual_reps_left, actual_reps_right,
-                  actual_sets, accuracy_percent, duration_seconds, notes) 
-                VALUES (?, ?, ?, CONVERT_TZ(NOW(), @@session.time_zone, '+00:00'), ?, ?, ?, 1, ?, ?, ?)`,
+          // ✅ ถูกต้อง - บันทึกเวลาไทยแล้วแปลงเป็น UTC
+          const [sessionResult] = await connection.execute(
+              `INSERT INTO Exercise_Sessions 
+              (patient_id, plan_id, exercise_id, session_date, 
+                actual_reps, actual_reps_left, actual_reps_right,
+                actual_sets, accuracy_percent, duration_seconds, notes) 
+              VALUES (?, ?, ?, CONVERT_TZ(NOW(), @@session.time_zone, '+00:00'), ?, ?, ?, 1, ?, ?, ?)`,
             [
                 patientId,
                 planId,
@@ -1445,24 +1446,14 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
     const patientId = patients[0].patient_id;
 
     // ✅ ดึงข้อมูลพร้อม timezone และข้อมูลซ้าย-ขวาครบถ้วน
+    // ✅ โค้ดใหม่
     const [sessions] = await connection.execute(`
       SELECT 
         es.session_id,
         es.patient_id,
         es.exercise_id,
         es.plan_id,
-        CONVERT_TZ(es.session_date, '+00:00', '+07:00') as session_date,
-        es.actual_reps,
-        es.actual_reps_left,
-        es.actual_reps_right,
-        es.actual_sets,
-        es.accuracy_percent,
-        es.duration_seconds,
-        es.notes,
-        e.name_th as exercise_name_th,
-        e.name_en as exercise_name_en,
-        e.description as exercise_description,
-        ep.plan_name
+        es.session_date,  // ✅ ไม่ต้อง CONVERT เพราะข้อมูลเป็นเวลาไทยอยู่แล้ว
       FROM Exercise_Sessions es
       JOIN Exercises e ON es.exercise_id = e.exercise_id
       JOIN ExercisePlans ep ON es.plan_id = ep.plan_id
