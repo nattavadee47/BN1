@@ -1449,11 +1449,11 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
     // ✅ โค้ดใหม่
     const [sessions] = await connection.execute(`
       SELECT 
-        es.session_id,
-        es.patient_id,
-        es.exercise_id,
-        es.plan_id,
-        es.session_date,  // ✅ ไม่ต้อง CONVERT เพราะข้อมูลเป็นเวลาไทยอยู่แล้ว
+          es.session_id,
+          es.patient_id,
+          es.exercise_id,
+          es.plan_id,
+          es.session_date  -- ไม่ต้อง CONVERT เพราะข้อมูลเป็นเวลาไทยอยู่แล้ว
       FROM Exercise_Sessions es
       JOIN Exercises e ON es.exercise_id = e.exercise_id
       JOIN ExercisePlans ep ON es.plan_id = ep.plan_id
