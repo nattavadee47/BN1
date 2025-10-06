@@ -1435,7 +1435,6 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
     }
 });
 
-// ดึงประวัติการออกกำลังกายโดยไม่ระบุ patientId (ใช้ user_id จาก token)
 app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
   const connection = await createConnection();
   
@@ -1451,15 +1450,24 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
     
     const patientId = patients[0].patient_id;
 
-    // ✅ ดึงข้อมูลพร้อม timezone และข้อมูลซ้าย-ขวาครบถ้วน
-    // ✅ โค้ดใหม่
+    // ✅ เพิ่มคอลัมน์ที่ขาดหายไป
     const [sessions] = await connection.execute(`
       SELECT 
           es.session_id,
           es.patient_id,
           es.exercise_id,
           es.plan_id,
-          es.session_date  -- ไม่ต้อง CONVERT เพราะข้อมูลเป็นเวลาไทยอยู่แล้ว
+          es.session_date,
+          es.actual_reps,
+          es.actual_reps_left,
+          es.actual_reps_right,
+          es.actual_sets,
+          es.accuracy_percent,
+          es.duration_seconds,
+          es.notes,
+          e.name_th,
+          e.name_en,
+          e.description
       FROM Exercise_Sessions es
       JOIN Exercises e ON es.exercise_id = e.exercise_id
       JOIN ExercisePlans ep ON es.plan_id = ep.plan_id
@@ -1486,7 +1494,11 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'เกิดข้อผิดพลาด',
+      error: error.message 
+    });
   } finally {
     await connection.end();
   }
