@@ -1495,6 +1495,11 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
       data: sessions,
       total: sessions.length
     });
+    res.json({
+      success: true,
+      data: sessions,
+      total: sessions.length
+    });
 
     res.json({
       success: true,
