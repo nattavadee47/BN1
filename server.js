@@ -30,8 +30,8 @@ const createConnection = async () => {
     timezone: '+07:00'
   });
   
-  // ตั้งค่า timezone สำหรับ session
   await connection.execute("SET time_zone = '+07:00'");
+  await connection.execute("SET SESSION time_zone = '+07:00'");
   
   return connection;
 };
@@ -1247,7 +1247,39 @@ app.get('/api/exercises', authenticateToken, async (req, res) => {
   }
 });
 
-// บันทึกผลการออกกำลังกาย
+// ฟังก์ชันประเมินผลการออกกำลังกาย
+async function evaluateExercisePerformance(connection, exerciseId, actualReps, holdTime) {
+    const [criteria] = await connection.execute(
+        'SELECT * FROM Exercise_Criteria WHERE exercise_id = ?',
+        [exerciseId]
+    );
+    
+    if (criteria.length === 0) {
+        return { level: 'unknown', message: 'ไม่พบเกณฑ์การประเมิน' };
+    }
+    
+    const standard = criteria[0];
+    let level = 'needs_improvement';
+    let message = 'ควรพยายามต่อไป';
+    
+    if (actualReps >= standard.min_reps_excellent) {
+        level = 'excellent';
+        message = 'ดีเยี่ยม! ทำได้ตามเป้าหมาย';
+    } else if (actualReps >= standard.min_reps_good) {
+        level = 'good';
+        message = 'ดี! ใกล้เป้าหมายแล้ว';
+    }
+    
+    return {
+        level,
+        message,
+        actual_reps: actualReps,
+        target_good: standard.min_reps_good,
+        target_excellent: standard.min_reps_excellent,
+        hold_time_met: holdTime >= standard.min_hold_time
+    };
+}
+
 app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
     const connection = await createConnection();
 
@@ -1264,8 +1296,6 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
 
         const total_reps = (parseInt(actual_reps_left) || 0) + (parseInt(actual_reps_right) || 0);
 
-        console.log('📝 Request body:', req.body);
-
         // หา patient_id
         const [patients] = await connection.execute(
             'SELECT patient_id FROM Patients WHERE user_id = ?',
@@ -1273,7 +1303,6 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
         );
 
         if (patients.length === 0) {
-            await connection.end();
             return res.status(404).json({ 
                 success: false, 
                 message: 'ไม่พบข้อมูลผู้ป่วย' 
@@ -1281,7 +1310,7 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
         }
         const patientId = patients[0].patient_id;
 
-        // หาหรือสร้าง Exercise
+        // หา/สร้าง Exercise
         let exerciseId = null;
         const [existingExercises] = await connection.execute(
             'SELECT exercise_id FROM Exercises WHERE name_en = ?',
@@ -1292,10 +1321,8 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
             exerciseId = existingExercises[0].exercise_id;
         } else {
             const [exerciseResult] = await connection.execute(
-                `INSERT INTO Exercises 
-                 (name_th, name_en, description) 
-                 VALUES (?, ?, ?)`,
-                [exercise_name || 'ท่ากายภาพ', exercise_type, `การออกกำลังกาย: ${exercise_name || exercise_type}`]
+                `INSERT INTO Exercises (name_th, name_en, description) VALUES (?, ?, ?)`,
+                [exercise_name, exercise_type, `การออกกำลังกาย: ${exercise_name}`]
             );
             exerciseId = exerciseResult.insertId;
         }
@@ -1306,13 +1333,11 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
         );
         
         if (physios.length === 0) {
-            await connection.end();
             return res.status(500).json({ 
                 success: false, 
                 message: 'ไม่พบนักกายภาพบำบัด' 
             });
         }
-        const physioId = physios[0].physio_id;
 
         let planId = null;
         const [existingPlans] = await connection.execute(
@@ -1329,56 +1354,51 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
                 `INSERT INTO ExercisePlans 
                  (patient_id, physio_id, plan_name, start_date, end_date) 
                  VALUES (?, ?, ?, CURDATE(), DATE_ADD(CURDATE(), INTERVAL 30 DAY))`,
-                [patientId, physioId, 'แผนการฝึกอัตโนมัติ']
+                [patientId, physios[0].physio_id, 'แผนการกึกอัตโนมัติ']
             );
             planId = planResult.insertId;
         }
 
-        // เตรียมข้อมูลและตรวจสอบ
-        const insertData = [
-            patientId,
-            planId,
-            exerciseId,
-            total_reps,
-            parseInt(actual_reps_left) || 0,
-            parseInt(actual_reps_right) || 0,
-            parseFloat(accuracy_percent) || 0,
-            parseInt(duration_seconds) || 0,
-            notes ? String(notes) : null
-        ];
-
-        console.log('🔍 Debug values before insert:', {
-            patientId,
-            planId,
-            exerciseId,
-            total_reps,
-            actual_reps_left: parseInt(actual_reps_left) || 0,
-            actual_reps_right: parseInt(actual_reps_right) || 0,
-            accuracy_percent: parseFloat(accuracy_percent) || 0,
-            duration_seconds: parseInt(duration_seconds) || 0,
-            notes: notes ? String(notes) : null
-        });
-
-        // ตรวจสอบ undefined
-        if (insertData.includes(undefined)) {
-            console.error('❌ Found undefined:', insertData);
-            await connection.end();
-            return res.status(400).json({
-                success: false,
-                message: 'ข้อมูลไม่ครบถ้วน'
-            });
-        }
-
-        const [sessionResult] = await connection.execute(
-            `INSERT INTO Exercise_Sessions 
-             (patient_id, plan_id, exercise_id, session_date, 
-              actual_reps, actual_reps_left, actual_reps_right,
-              actual_sets, accuracy_percent, duration_seconds, notes) 
-             VALUES (?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
-            insertData
+        // ✅ บันทึก Session พร้อมเวลาไทย
+        // ✅ โค้ดใหม่ - บันทึกเวลาไทยแล้วแปลงเป็น UTC
+            const [sessionResult] = await connection.execute(
+                `INSERT INTO Exercise_Sessions 
+                (patient_id, plan_id, exercise_id, session_date, 
+                  actual_reps, actual_reps_left, actual_reps_right,
+                  actual_sets, accuracy_percent, duration_seconds, notes) 
+                VALUES (?, ?, ?, CONVERT_TZ(NOW(), @@session.time_zone, '+00:00'), ?, ?, ?, 1, ?, ?, ?)`,
+            [
+                patientId,
+                planId,
+                exerciseId,
+                total_reps,
+                parseInt(actual_reps_left) || 0,
+                parseInt(actual_reps_right) || 0,
+                parseFloat(accuracy_percent) || 0,
+                parseInt(duration_seconds) || 0,
+                notes || ''
+            ]
         );
 
-        console.log('✅ Saved:', sessionResult.insertId);
+        // ✅ ตรวจสอบเวลาที่บันทึก
+        const [checkTime] = await connection.execute(
+            `SELECT 
+                session_date,
+                CONVERT_TZ(session_date, @@session.time_zone, '+07:00') as thai_time,
+                @@session.time_zone as current_tz
+            FROM Exercise_Sessions 
+            WHERE session_id = ?`,
+            [sessionResult.insertId]
+        );
+
+        console.log('⏰ Time check:', {
+            session_id: sessionResult.insertId,
+            saved_time: checkTime[0]?.session_date,
+            thai_time: checkTime[0]?.thai_time,
+            timezone: checkTime[0]?.current_tz,
+            server_time: new Date().toISOString(),
+            bangkok_time: new Date().toLocaleString('en-US', { timeZone: 'Asia/Bangkok' })
+        });
 
         await connection.end();
 
@@ -1391,23 +1411,19 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
                 actual_reps_right: parseInt(actual_reps_right) || 0,
                 total: total_reps,
                 accuracy_percent: parseFloat(accuracy_percent) || 0,
-                duration_seconds: parseInt(duration_seconds) || 0
+                duration_seconds: parseInt(duration_seconds) || 0,
+                saved_time: checkTime[0]?.saved_time,
+                thai_time: checkTime[0]?.thai_time
             }
         });
 
     } catch (error) {
-        console.error('❌ Error:', error.message);
-        
-        if (connection) {
-            try {
-                await connection.end();
-            } catch (e) {}
-        }
-        
+        console.error('❌ Error:', error);
+        if (connection) await connection.end();
         res.status(500).json({ 
             success: false, 
-            message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล',
-            error: error.message
+            message: 'เกิดข้อผิดพลาด',
+            error: error.message 
         });
     }
 });
