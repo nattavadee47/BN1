@@ -1450,7 +1450,7 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
     
     const patientId = patients[0].patient_id;
 
-    // ✅ เพิ่มคอลัมน์ที่ขาดหายไป
+    // ✅ เพิ่มฟิลด์ชื่อท่าและข้อมูลซ้าย-ขวา
     const [sessions] = await connection.execute(`
       SELECT 
           es.session_id,
@@ -1461,12 +1461,11 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
           es.actual_reps,
           es.actual_reps_left,
           es.actual_reps_right,
-          es.actual_sets,
           es.accuracy_percent,
           es.duration_seconds,
           es.notes,
-          e.name_th,
-          e.name_en,
+          e.name_th as exercise_name_th,
+          e.name_en as exercise_name_en,
           e.description
       FROM Exercise_Sessions es
       JOIN Exercises e ON es.exercise_id = e.exercise_id
@@ -1479,8 +1478,6 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
     console.log('✅ Loaded sessions:', {
       count: sessions.length,
       sample: sessions[0] ? {
-        session_id: sessions[0].session_id,
-        exercise_id: sessions[0].exercise_id,
         exercise_name_th: sessions[0].exercise_name_th,
         exercise_name_en: sessions[0].exercise_name_en,
         left: sessions[0].actual_reps_left,
@@ -1495,25 +1492,10 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
       data: sessions,
       total: sessions.length
     });
-    res.json({
-      success: true,
-      data: sessions,
-      total: sessions.length
-    });
-
-    res.json({
-      success: true,
-      data: sessions,
-      total: sessions.length
-    });
 
   } catch (error) {
     console.error('❌ Error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'เกิดข้อผิดพลาด',
-      error: error.message 
-    });
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด' });
   } finally {
     await connection.end();
   }
