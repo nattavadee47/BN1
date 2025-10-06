@@ -1359,15 +1359,14 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
             planId = planResult.insertId;
         }
 
-        // ✅ บันทึก Session พร้อมเวลาไทย
-        // ✅ โค้ดใหม่ - บันทึกเวลาไทยแล้วแปลงเป็น UTC
           // ✅ ถูกต้อง - บันทึกเวลาไทยแล้วแปลงเป็น UTC
-          const [sessionResult] = await connection.execute(
-              `INSERT INTO Exercise_Sessions 
-              (patient_id, plan_id, exercise_id, session_date, 
-                actual_reps, actual_reps_left, actual_reps_right,
-                actual_sets, accuracy_percent, duration_seconds, notes) 
-              VALUES (?, ?, ?, CONVERT_TZ(NOW(), @@session.time_zone, '+00:00'), ?, ?, ?, 1, ?, ?, ?)`,
+          // บันทึก Session ด้วยเวลาไทยปัจจุบัน
+        const [sessionResult] = await connection.execute(
+            `INSERT INTO Exercise_Sessions 
+            (patient_id, plan_id, exercise_id, session_date, 
+              actual_reps, actual_reps_left, actual_reps_right,
+              actual_sets, accuracy_percent, duration_seconds, notes) 
+            VALUES (?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
             [
                 patientId,
                 planId,
@@ -1380,6 +1379,13 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
                 notes || ''
             ]
         );
+
+        console.log('✅ Session saved:', {
+            session_id: sessionResult.insertId,
+            left: actual_reps_left,
+            right: actual_reps_right,
+            total: total_reps
+        });
 
         // ✅ ตรวจสอบเวลาที่บันทึก
         const [checkTime] = await connection.execute(
