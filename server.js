@@ -1479,11 +1479,21 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
     console.log('✅ Loaded sessions:', {
       count: sessions.length,
       sample: sessions[0] ? {
+        session_id: sessions[0].session_id,
+        exercise_id: sessions[0].exercise_id,
+        exercise_name_th: sessions[0].exercise_name_th,
+        exercise_name_en: sessions[0].exercise_name_en,
         left: sessions[0].actual_reps_left,
         right: sessions[0].actual_reps_right,
         total: sessions[0].actual_reps,
         date: sessions[0].session_date
       } : null
+    });
+
+    res.json({
+      success: true,
+      data: sessions,
+      total: sessions.length
     });
 
     res.json({
