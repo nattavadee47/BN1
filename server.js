@@ -2251,6 +2251,366 @@ app.get('/api/caregiver/patients/:patientId/stats', authenticateToken, async (re
   }
 });
 
+// ========================
+// API Endpoint สำหรับค้นหาผู้ป่วยด้วยเบอร์โทรศัพท์
+// เพิ่มใน server.js
+// ========================
+
+// ค้นหาผู้ใช้ด้วยเบอร์โทรศัพท์ (สำหรับ Caregiver ค้นหาผู้ป่วย)
+app.get('/api/users/search-by-phone/:phone', async (req, res) => {
+  let connection;
+  
+  try {
+    const { phone } = req.params;
+    
+    console.log('🔍 Searching for user with phone:', phone);
+    
+    // ตรวจสอบเบอร์โทรศัพท์
+    if (!phone || phone.length !== 10) {
+      return res.status(400).json({
+        success: false,
+        message: 'เบอร์โทรศัพท์ต้องเป็นตัวเลข 10 หลัก'
+      });
+    }
+    
+    connection = await createConnection();
+    
+    // ค้นหาผู้ใช้จากเบอร์โทรศัพท์
+    const [users] = await connection.execute(
+      `SELECT 
+        user_id,
+        phone,
+        first_name,
+        last_name,
+        birth_date,
+        gender,
+        role,
+        created_at
+      FROM users 
+      WHERE phone = ?`,
+      [phone]
+    );
+    
+    if (users.length === 0) {
+      console.log('❌ User not found with phone:', phone);
+      return res.status(404).json({
+        success: false,
+        message: 'ไม่พบผู้ใช้งานที่มีเบอร์โทรศัพท์นี้'
+      });
+    }
+    
+    const user = users[0];
+    
+    console.log('✅ User found:', {
+      user_id: user.user_id,
+      name: `${user.first_name} ${user.last_name}`,
+      role: user.role
+    });
+    
+    // ไม่ส่งข้อมูลที่ sensitive
+    const { password_hash, ...userData } = user;
+    
+    res.json({
+      success: true,
+      message: 'พบข้อมูลผู้ใช้งาน',
+      data: userData
+    });
+    
+  } catch (error) {
+    console.error('❌ Error searching user by phone:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการค้นหา',
+      error: error.message
+    });
+  } finally {
+    if (connection) await connection.end();
+  }
+});
+
+// ========================
+// แก้ไข API Register เพื่อรองรับ Caregiver
+// ========================
+
+app.post('/api/auth/register', async (req, res) => {
+  let connection;
+  
+  try {
+    const {
+      phone,
+      password,
+      first_name,
+      last_name,
+      birth_date,
+      gender,
+      role,
+      // ข้อมูลผู้ป่วย
+      weight,
+      height,
+      injured_side,
+      injured_part,
+      emergency_contact_name,
+      emergency_contact_phone,
+      emergency_contact_relation,
+      // ข้อมูล Caregiver
+      patient_id,
+      patient_phone,
+      relationship,
+      // ข้อมูลนักกายภาพบำบัด
+      license_number,
+      specialization
+    } = req.body;
+
+    console.log('📝 Registration request:', {
+      phone,
+      role,
+      name: `${first_name} ${last_name}`,
+      patient_id: patient_id || 'N/A'
+    });
+
+    // Validation
+    if (!phone || !password || !first_name || !last_name || !birth_date || !gender || !role) {
+      return res.status(400).json({
+        success: false,
+        message: 'กรุณากรอกข้อมูลให้ครบถ้วน'
+      });
+    }
+
+    if (!/^[0-9]{10}$/.test(phone)) {
+      return res.status(400).json({
+        success: false,
+        message: 'เบอร์โทรศัพท์ต้องเป็นตัวเลข 10 หลัก'
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'
+      });
+    }
+
+    // ตรวจสอบว่า Caregiver ต้องระบุ patient_id
+    if (role === 'ผู้ช่วยผู้ดูแล' && !patient_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'กรุณาค้นหาและเลือกผู้ป่วยที่ต้องการดูแล'
+      });
+    }
+
+    connection = await createConnection();
+
+    // ตรวจสอบเบอร์โทรซ้ำ
+    const [existingUsers] = await connection.execute(
+      'SELECT user_id FROM users WHERE phone = ?',
+      [phone]
+    );
+
+    if (existingUsers.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'เบอร์โทรศัพท์นี้มีการลงทะเบียนแล้ว'
+      });
+    }
+
+    // เข้ารหัสรหัสผ่าน
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // สร้าง full_name
+    const full_name = `${first_name} ${last_name}`;
+
+    // เริ่ม transaction
+    await connection.beginTransaction();
+
+    try {
+      // Insert user
+      const [userResult] = await connection.execute(
+        `INSERT INTO users (
+          phone, password_hash, first_name, last_name, full_name,
+          birth_date, gender, role, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [phone, hashedPassword, first_name, last_name, full_name, birth_date, gender, role]
+      );
+
+      const userId = userResult.insertId;
+      console.log('✅ User created with ID:', userId);
+
+      // ถ้าเป็นผู้ป่วย - บันทึกข้อมูลเพิ่มเติม
+      if (role === 'ผู้ป่วย') {
+        await connection.execute(
+          `INSERT INTO patients (
+            user_id, weight, height, injured_side, injured_part,
+            emergency_contact_name, emergency_contact_phone, emergency_contact_relation,
+            created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+          [
+            userId,
+            weight || null,
+            height || null,
+            injured_side || null,
+            injured_part || null,
+            emergency_contact_name || null,
+            emergency_contact_phone || null,
+            emergency_contact_relation || null
+          ]
+        );
+        console.log('✅ Patient data saved');
+      }
+
+      // ถ้าเป็น Caregiver - เชื่อมโยงกับผู้ป่วย
+      if (role === 'ผู้ช่วยผู้ดูแล' && patient_id) {
+        // ตรวจสอบว่าผู้ป่วยมีอยู่จริง
+        const [patients] = await connection.execute(
+          'SELECT user_id FROM users WHERE user_id = ? AND role = ?',
+          [patient_id, 'ผู้ป่วย']
+        );
+
+        if (patients.length === 0) {
+          throw new Error('ไม่พบข้อมูลผู้ป่วยในระบบ');
+        }
+
+        // บันทึกข้อมูล Caregiver
+        await connection.execute(
+          `INSERT INTO caregivers (
+            user_id, patient_id, relationship, created_at
+          ) VALUES (?, ?, ?, NOW())`,
+          [userId, patient_id, relationship || null]
+        );
+        
+        // อัพเดทเบอร์ฉุกเฉินของผู้ป่วย (ถ้ายังไม่มี)
+        await connection.execute(
+          `UPDATE patients 
+           SET emergency_contact_phone = COALESCE(emergency_contact_phone, ?),
+               emergency_contact_name = COALESCE(emergency_contact_name, ?),
+               emergency_contact_relation = COALESCE(emergency_contact_relation, ?)
+           WHERE user_id = ?`,
+          [phone, full_name, relationship || 'ผู้ช่วยดูแล', patient_id]
+        );
+        
+        console.log('✅ Caregiver linked to patient:', patient_id);
+      }
+
+      // ถ้าเป็นนักกายภาพบำบัด - บันทึกข้อมูลใบประกอบวิชาชีพ
+      if (role === 'นักกายภาพบำบัด') {
+        await connection.execute(
+          `INSERT INTO physiotherapists (
+            user_id, license_number, specialization, created_at
+          ) VALUES (?, ?, ?, NOW())`,
+          [userId, license_number || null, specialization || null]
+        );
+        console.log('✅ Physiotherapist data saved');
+      }
+
+      // Commit transaction
+      await connection.commit();
+
+      // สร้าง JWT token
+      const token = jwt.sign(
+        {
+          user_id: userId,
+          phone: phone,
+          role: role,
+          full_name: full_name
+        },
+        JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+
+      console.log('✅ Registration successful for:', full_name);
+
+      res.status(201).json({
+        success: true,
+        message: 'สมัครสมาชิกสำเร็จ',
+        data: {
+          user_id: userId,
+          phone: phone,
+          full_name: full_name,
+          role: role,
+          token: token
+        }
+      });
+
+    } catch (error) {
+      // Rollback transaction on error
+      await connection.rollback();
+      throw error;
+    }
+
+  } catch (error) {
+    console.error('❌ Registration error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'เกิดข้อผิดพลาดในการสมัครสมาชิก',
+      error: error.message
+    });
+  } finally {
+    if (connection) await connection.end();
+  }
+});
+
+// ========================
+// API สำหรับ Caregiver ดูข้อมูลผู้ป่วยที่ดูแล
+// ========================
+
+app.get('/api/caregiver/patients', authenticateToken, async (req, res) => {
+  let connection;
+  
+  try {
+    const caregiverId = req.user.user_id;
+    
+    console.log('👥 Fetching patients for caregiver:', caregiverId);
+    
+    connection = await createConnection();
+    
+    // ดึงรายชื่อผู้ป่วยที่ Caregiver ดูแล
+    const [patients] = await connection.execute(
+      `SELECT 
+        u.user_id as patient_id,
+        u.phone,
+        u.first_name,
+        u.last_name,
+        u.full_name,
+        u.birth_date,
+        u.gender,
+        p.injured_side,
+        p.injured_part,
+        c.relationship,
+        c.created_at as caregiver_since
+      FROM caregivers c
+      INNER JOIN users u ON c.patient_id = u.user_id
+      LEFT JOIN patients p ON u.user_id = p.user_id
+      WHERE c.user_id = ?
+      ORDER BY c.created_at DESC`,
+      [caregiverId]
+    );
+    
+    console.log('✅ Found', patients.length, 'patients');
+    
+    // ดึงข้อมูล Caregiver
+    const [caregiver] = await connection.execute(
+      'SELECT phone, full_name FROM users WHERE user_id = ?',
+      [caregiverId]
+    );
+    
+    res.json({
+      success: true,
+      message: 'ดึงข้อมูลผู้ป่วยสำเร็จ',
+      data: patients,
+      caregiver_info: caregiver[0] || null
+    });
+    
+  } catch (error) {
+    console.error('❌ Error fetching caregiver patients:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการดึงข้อมูล',
+      error: error.message
+    });
+  } finally {
+    if (connection) await connection.end();
+  }
+});
+
 // Debug: สร้าง Admin ทดสอบ
 app.post('/api/debug/create-admin', async (req, res) => {
   const connection = await createConnection();
