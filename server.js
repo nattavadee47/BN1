@@ -2002,6 +2002,254 @@ app.get('/api/debug/admins', async (req, res) => {
     await connection.end();
   }
 });
+ // ========================
+// Caregiver APIs - ระบบผู้ดูแลผู้ป่วย
+// ========================
+
+// ✅ ดึงผู้ป่วยที่ผู้ดูแลดูแล (ผ่านเบอร์ฉุกเฉิน)
+app.get('/api/caregiver/patients', authenticateToken, async (req, res) => {
+  const connection = await createConnection();
+  
+  try {
+    console.log('👨‍👩‍👧 Loading patients for caregiver:', req.user.user_id);
+    
+    // ดึงข้อมูล Caregiver
+    const [caregivers] = await connection.execute(
+      'SELECT * FROM Caregivers WHERE user_id = ?',
+      [req.user.user_id]
+    );
+    
+    if (caregivers.length === 0) {
+      console.log('⚠️ Caregiver record not found');
+      return res.status(404).json({
+        success: false,
+        message: 'ไม่พบข้อมูลผู้ดูแล กรุณาติดต่อเจ้าหน้าที่'
+      });
+    }
+    
+    // ดึงเบอร์โทรของผู้ดูแล
+    const [users] = await connection.execute(
+      'SELECT phone, full_name FROM Users WHERE user_id = ?',
+      [req.user.user_id]
+    );
+    
+    if (users.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'ไม่พบข้อมูลผู้ใช้'
+      });
+    }
+    
+    const caregiverPhone = users[0].phone;
+    const caregiverName = users[0].full_name;
+    console.log('📞 Caregiver phone:', caregiverPhone);
+    console.log('👤 Caregiver name:', caregiverName);
+    
+    // ✅ ดึงผู้ป่วยที่มีเบอร์ฉุกเฉินตรงกับเบอร์ผู้ดูแล
+    const [patients] = await connection.execute(`
+      SELECT 
+        p.*,
+        u.phone as user_phone,
+        u.full_name
+      FROM Patients p
+      JOIN Users u ON p.user_id = u.user_id
+      WHERE p.emergency_contact_phone = ?
+      ORDER BY p.patient_id DESC
+    `, [caregiverPhone]);
+    
+    console.log(`✅ Found ${patients.length} patient(s) for caregiver: ${caregiverName}`);
+    
+    res.json({
+      success: true,
+      data: patients,
+      caregiver_info: {
+        caregiver_id: caregivers[0].caregiver_id,
+        phone: caregiverPhone,
+        name: caregiverName,
+        relationship: caregivers[0].relationship,
+        patients_count: patients.length
+      },
+      message: patients.length === 0 ? 'ยังไม่มีผู้ป่วยในความดูแล กรุณาติดต่อเจ้าหน้าที่เพื่อเพิ่มเบอร์โทรของคุณเป็นเบอร์ฉุกเฉินในข้อมูลผู้ป่วย' : null
+    });
+    
+  } catch (error) {
+    console.error('❌ Error loading caregiver patients:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการดึงข้อมูลผู้ป่วย',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    await connection.end();
+  }
+});
+
+// ✅ ดึงรายละเอียดผู้ป่วยรายเดียว (ต้องเป็นผู้ป่วยที่ดูแล)
+app.get('/api/caregiver/patients/:patientId', authenticateToken, async (req, res) => {
+  const connection = await createConnection();
+  const patientId = parseInt(req.params.patientId);
+  
+  try {
+    console.log('🔍 Loading patient details:', patientId);
+    
+    // ดึงเบอร์โทรของผู้ดูแล
+    const [users] = await connection.execute(
+      'SELECT phone FROM Users WHERE user_id = ?',
+      [req.user.user_id]
+    );
+    
+    if (users.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'ไม่พบข้อมูลผู้ใช้'
+      });
+    }
+    
+    const caregiverPhone = users[0].phone;
+    console.log('📞 Verifying access for caregiver:', caregiverPhone);
+    
+    // ตรวจสอบว่าผู้ป่วยนี้อยู่ในความดูแลหรือไม่
+    const [patients] = await connection.execute(`
+      SELECT 
+        p.*,
+        u.phone as user_phone,
+        u.full_name,
+        u.created_at as registration_date
+      FROM Patients p
+      JOIN Users u ON p.user_id = u.user_id
+      WHERE p.patient_id = ? AND p.emergency_contact_phone = ?
+    `, [patientId, caregiverPhone]);
+    
+    if (patients.length === 0) {
+      console.log('⚠️ Access denied - patient not under care');
+      return res.status(403).json({
+        success: false,
+        message: 'คุณไม่มีสิทธิ์เข้าถึงข้อมูลผู้ป่วยรายนี้'
+      });
+    }
+    
+    console.log('✅ Patient details loaded');
+    
+    res.json({
+      success: true,
+      data: {
+        patient: patients[0]
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error loading patient details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการดึงข้อมูล',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    await connection.end();
+  }
+});
+
+// ✅ ดึงสถิติการฝึกของผู้ป่วย (ต้องเป็นผู้ป่วยที่ดูแล)
+app.get('/api/caregiver/patients/:patientId/stats', authenticateToken, async (req, res) => {
+  const connection = await createConnection();
+  const patientId = parseInt(req.params.patientId);
+  
+  try {
+    console.log('📊 Loading stats for patient:', patientId);
+    
+    // ตรวจสอบสิทธิ์
+    const [users] = await connection.execute(
+      'SELECT phone FROM Users WHERE user_id = ?',
+      [req.user.user_id]
+    );
+    
+    if (users.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'ไม่พบข้อมูลผู้ใช้'
+      });
+    }
+    
+    const caregiverPhone = users[0].phone;
+    
+    // ตรวจสอบว่าเป็นผู้ป่วยที่ดูแล
+    const [patients] = await connection.execute(
+      'SELECT patient_id FROM Patients WHERE patient_id = ? AND emergency_contact_phone = ?',
+      [patientId, caregiverPhone]
+    );
+    
+    if (patients.length === 0) {
+      console.log('⚠️ Access denied - patient not under care');
+      return res.status(403).json({
+        success: false,
+        message: 'คุณไม่มีสิทธิ์เข้าถึงข้อมูลผู้ป่วยรายนี้'
+      });
+    }
+    
+    // ดึงสถิติรวม
+    const [totalStats] = await connection.execute(`
+      SELECT 
+        COUNT(*) as total_sessions,
+        AVG(accuracy_percent) as avg_accuracy,
+        SUM(actual_reps) as total_reps,
+        MAX(accuracy_percent) as best_accuracy,
+        MIN(session_date) as first_session,
+        MAX(session_date) as last_session
+      FROM Exercise_Sessions 
+      WHERE patient_id = ?
+    `, [patientId]);
+
+    // สถิติ 7 วันล่าสุด
+    const [weeklyStats] = await connection.execute(`
+      SELECT 
+        DATE(session_date) as session_date,
+        COUNT(*) as sessions_count,
+        AVG(accuracy_percent) as avg_accuracy,
+        SUM(actual_reps) as total_reps
+      FROM Exercise_Sessions 
+      WHERE patient_id = ? 
+        AND session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+      GROUP BY DATE(session_date)
+      ORDER BY session_date ASC
+    `, [patientId]);
+
+    // แบบฝึกยอดนิยม
+    const [popularExercises] = await connection.execute(`
+      SELECT 
+        e.name_th,
+        e.name_en,
+        COUNT(*) as session_count,
+        AVG(es.accuracy_percent) as avg_accuracy
+      FROM Exercise_Sessions es
+      JOIN Exercises e ON es.exercise_id = e.exercise_id
+      WHERE es.patient_id = ?
+      GROUP BY es.exercise_id, e.name_th, e.name_en
+      ORDER BY session_count DESC
+      LIMIT 5
+    `, [patientId]);
+    
+    console.log('✅ Stats loaded successfully');
+
+    res.json({
+      success: true,
+      data: {
+        total_stats: totalStats[0],
+        weekly_progress: weeklyStats,
+        popular_exercises: popularExercises
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error loading patient stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการดึงสถิติ',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    await connection.end();
+  }
+});
 
 // Debug: สร้าง Admin ทดสอบ
 app.post('/api/debug/create-admin', async (req, res) => {
