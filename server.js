@@ -781,7 +781,7 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
             exerciseId = exerciseResult.insertId;
         }
 
-        // หา/สร้าง Plan
+        // หา plan_id
         const [physios] = await connection.execute(
             'SELECT physio_id FROM Physiotherapists LIMIT 1'
         );
@@ -808,12 +808,13 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
                 `INSERT INTO ExercisePlans 
                  (patient_id, physio_id, plan_name, start_date, end_date) 
                  VALUES (?, ?, ?, CURDATE(), DATE_ADD(CURDATE(), INTERVAL 30 DAY))`,
-                [patientId, physios[0].physio_id, 'แผนการฝึกอัตโนมัติ']
+                [patientId, physios[0].physio_id, 'แผนการกึกอัตโนมัติ']
             );
             planId = planResult.insertId;
         }
 
-        // บันทึก Session
+          // ✅ ถูกต้อง - บันทึกเวลาไทยแล้วแปลงเป็น UTC
+          // บันทึก Session ด้วยเวลาไทยปัจจุบัน
         const [sessionResult] = await connection.execute(
             `INSERT INTO Exercise_Sessions 
             (patient_id, plan_id, exercise_id, session_date, 
@@ -840,6 +841,28 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
             total: total_reps
         });
 
+        // ✅ ตรวจสอบเวลาที่บันทึก
+        const [checkTime] = await connection.execute(
+            `SELECT 
+                session_date,
+                CONVERT_TZ(session_date, @@session.time_zone, '+07:00') as thai_time,
+                @@session.time_zone as current_tz
+            FROM Exercise_Sessions 
+            WHERE session_id = ?`,
+            [sessionResult.insertId]
+        );
+
+        console.log('⏰ Time check:', {
+            session_id: sessionResult.insertId,
+            saved_time: checkTime[0]?.session_date,
+            thai_time: checkTime[0]?.thai_time,
+            timezone: checkTime[0]?.current_tz,
+            server_time: new Date().toISOString(),
+            bangkok_time: new Date().toLocaleString('en-US', { timeZone: 'Asia/Bangkok' })
+        });
+
+        await connection.end();
+
         res.status(201).json({
             success: true,
             message: 'บันทึกสำเร็จ',
@@ -849,21 +872,22 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
                 actual_reps_right: parseInt(actual_reps_right) || 0,
                 total: total_reps,
                 accuracy_percent: parseFloat(accuracy_percent) || 0,
-                duration_seconds: parseInt(duration_seconds) || 0
+                duration_seconds: parseInt(duration_seconds) || 0,
+                saved_time: checkTime[0]?.saved_time,
+                thai_time: checkTime[0]?.thai_time
             }
         });
 
     } catch (error) {
         console.error('❌ Error:', error);
+        if (connection) await connection.end();
         res.status(500).json({ 
             success: false, 
-            message: 'เกิดข้อผิดพลาด'
+            message: 'เกิดข้อผิดพลาด',
+            error: error.message 
         });
-    } finally {
-        if (connection) await connection.end();
     }
 });
-
 // ========================
 // 7. ดูประวัติการฝึก
 // ========================
@@ -924,7 +948,7 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
 // ========================
 // 8. ดูสถิติการฝึก
 // ========================
-app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
+app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
   const connection = await createConnection();
   
   try {
@@ -934,75 +958,61 @@ app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
     );
     
     if (patients.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'ไม่พบข้อมูลผู้ป่วย'
-      });
+      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้ป่วย' });
     }
     
     const patientId = patients[0].patient_id;
 
-    // สถิติรวม
-    const [totalStats] = await connection.execute(`
+    // ✅ เพิ่มฟิลด์ชื่อท่าและข้อมูลซ้าย-ขวา
+    const [sessions] = await connection.execute(`
       SELECT 
-        COUNT(*) as total_sessions,
-        AVG(accuracy_percent) as avg_accuracy,
-        SUM(actual_reps) as total_reps,
-        MAX(accuracy_percent) as best_accuracy,
-        MIN(session_date) as first_session,
-        MAX(session_date) as last_session
-      FROM Exercise_Sessions 
-      WHERE patient_id = ?
-    `, [patientId]);
-
-    // สถิติ 7 วันล่าสุด
-    const [weeklyStats] = await connection.execute(`
-      SELECT 
-        DATE(session_date) as session_date,
-        COUNT(*) as sessions_count,
-        AVG(accuracy_percent) as avg_accuracy,
-        SUM(actual_reps) as total_reps
-      FROM Exercise_Sessions 
-      WHERE patient_id = ? AND session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-      GROUP BY DATE(session_date)
-      ORDER BY session_date DESC
-    `, [patientId]);
-
-    // แบบฝึกยอดนิยม
-    const [popularExercises] = await connection.execute(`
-      SELECT 
-        e.name_th,
-        e.name_en,
-        COUNT(*) as session_count,
-        AVG(es.accuracy_percent) as avg_accuracy
+          es.session_id,
+          es.patient_id,
+          es.exercise_id,
+          es.plan_id,
+          es.session_date,
+          es.actual_reps,
+          es.actual_reps_left,
+          es.actual_reps_right,
+          es.accuracy_percent,
+          es.duration_seconds,
+          es.notes,
+          e.name_th as exercise_name_th,
+          e.name_en as exercise_name_en,
+          e.description
       FROM Exercise_Sessions es
       JOIN Exercises e ON es.exercise_id = e.exercise_id
+      JOIN ExercisePlans ep ON es.plan_id = ep.plan_id
       WHERE es.patient_id = ?
-      GROUP BY es.exercise_id, e.name_th, e.name_en
-      ORDER BY session_count DESC
-      LIMIT 5
+      ORDER BY es.session_date DESC
+      LIMIT 50
     `, [patientId]);
+
+    console.log('✅ Loaded sessions:', {
+      count: sessions.length,
+      sample: sessions[0] ? {
+        exercise_name_th: sessions[0].exercise_name_th,
+        exercise_name_en: sessions[0].exercise_name_en,
+        left: sessions[0].actual_reps_left,
+        right: sessions[0].actual_reps_right,
+        total: sessions[0].actual_reps,
+        date: sessions[0].session_date
+      } : null
+    });
 
     res.json({
       success: true,
-      data: {
-        total_stats: totalStats[0],
-        weekly_progress: weeklyStats,
-        popular_exercises: popularExercises
-      }
+      data: sessions,
+      total: sessions.length
     });
 
   } catch (error) {
-    console.error('ข้อผิดพลาดในการดึงสถิติ:', error);
-    res.status(500).json({
-      success: false,
-      message: 'เกิดข้อผิดพลาดในการดึงสถิติการออกกำลังกาย'
-    });
+    console.error('❌ Error:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด' });
   } finally {
     await connection.end();
   }
 });
-
 // ========================
 // จัดการข้อผิดพลาด
 // ========================
