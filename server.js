@@ -735,284 +735,276 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
 // 6. บันทึกผลการฝึก
 // ========================
 app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
-    const connection = await createConnection();
-
+  let connection;
+  
+  try {
+    const userId = req.user.user_id;
+    
+    const {
+      exercise_type,
+      exercise_name,
+      actual_reps,
+      target_reps,
+      accuracy,
+      session_duration,
+      left_count,
+      right_count
+    } = req.body;
+    
+    console.log('💾 บันทึกข้อมูลการฝึก:', {
+      userId,
+      exercise_name,
+      actual_reps,
+      left_count,
+      right_count
+    });
+    
+    connection = await createConnection();
+    
+    // หา exercise_id จากชื่อท่า (ถ้ามีตาราง Exercises)
+    let exercise_id = null;
     try {
-        const {
-            exercise_type,
-            exercise_name,
-            actual_reps_left,
-            actual_reps_right,
-            accuracy_percent,
-            duration_seconds,
-            notes
-        } = req.body;
-
-        const total_reps = (parseInt(actual_reps_left) || 0) + (parseInt(actual_reps_right) || 0);
-
-        // หา patient_id
-        const [patients] = await connection.execute(
-            'SELECT patient_id FROM Patients WHERE user_id = ?',
-            [req.user.user_id]
-        );
-
-        if (patients.length === 0) {
-            return res.status(404).json({ 
-                success: false, 
-                message: 'ไม่พบข้อมูลผู้ป่วย' 
-            });
-        }
-        const patientId = patients[0].patient_id;
-
-        // หา/สร้าง Exercise
-        let exerciseId = null;
-        const [existingExercises] = await connection.execute(
-            'SELECT exercise_id FROM Exercises WHERE name_en = ?',
-            [exercise_type]
-        );
-
-        if (existingExercises.length > 0) {
-            exerciseId = existingExercises[0].exercise_id;
-        } else {
-            const [exerciseResult] = await connection.execute(
-                `INSERT INTO Exercises (name_th, name_en, description) VALUES (?, ?, ?)`,
-                [exercise_name, exercise_type, `การออกกำลังกาย: ${exercise_name}`]
-            );
-            exerciseId = exerciseResult.insertId;
-        }
-
-        // หา plan_id
-        const [physios] = await connection.execute(
-            'SELECT physio_id FROM Physiotherapists LIMIT 1'
-        );
-        
-        if (physios.length === 0) {
-            return res.status(500).json({ 
-                success: false, 
-                message: 'ไม่พบนักกายภาพบำบัด' 
-            });
-        }
-
-        let planId = null;
-        const [existingPlans] = await connection.execute(
-            `SELECT plan_id FROM ExercisePlans 
-             WHERE patient_id = ? AND (end_date IS NULL OR end_date >= CURDATE())
-             LIMIT 1`,
-            [patientId]
-        );
-
-        if (existingPlans.length > 0) {
-            planId = existingPlans[0].plan_id;
-        } else {
-            const [planResult] = await connection.execute(
-                `INSERT INTO ExercisePlans 
-                 (patient_id, physio_id, plan_name, start_date, end_date) 
-                 VALUES (?, ?, ?, CURDATE(), DATE_ADD(CURDATE(), INTERVAL 30 DAY))`,
-                [patientId, physios[0].physio_id, 'แผนการกึกอัตโนมัติ']
-            );
-            planId = planResult.insertId;
-        }
-
-          // ✅ ถูกต้อง - บันทึกเวลาไทยแล้วแปลงเป็น UTC
-          // บันทึก Session ด้วยเวลาไทยปัจจุบัน
-        const [sessionResult] = await connection.execute(
-            `INSERT INTO Exercise_Sessions 
-            (patient_id, plan_id, exercise_id, session_date, 
-              actual_reps, actual_reps_left, actual_reps_right,
-              actual_sets, accuracy_percent, duration_seconds, notes) 
-            VALUES (?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
-            [
-                patientId,
-                planId,
-                exerciseId,
-                total_reps,
-                parseInt(actual_reps_left) || 0,
-                parseInt(actual_reps_right) || 0,
-                parseFloat(accuracy_percent) || 0,
-                parseInt(duration_seconds) || 0,
-                notes || ''
-            ]
-        );
-
-        console.log('✅ Session saved:', {
-            session_id: sessionResult.insertId,
-            left: actual_reps_left,
-            right: actual_reps_right,
-            total: total_reps
-        });
-
-        // ✅ ตรวจสอบเวลาที่บันทึก
-        const [checkTime] = await connection.execute(
-            `SELECT 
-                session_date,
-                CONVERT_TZ(session_date, @@session.time_zone, '+07:00') as thai_time,
-                @@session.time_zone as current_tz
-            FROM Exercise_Sessions 
-            WHERE session_id = ?`,
-            [sessionResult.insertId]
-        );
-
-        console.log('⏰ Time check:', {
-            session_id: sessionResult.insertId,
-            saved_time: checkTime[0]?.session_date,
-            thai_time: checkTime[0]?.thai_time,
-            timezone: checkTime[0]?.current_tz,
-            server_time: new Date().toISOString(),
-            bangkok_time: new Date().toLocaleString('en-US', { timeZone: 'Asia/Bangkok' })
-        });
-
-        await connection.end();
-
-        res.status(201).json({
-            success: true,
-            message: 'บันทึกสำเร็จ',
-            data: {
-                session_id: sessionResult.insertId,
-                actual_reps_left: parseInt(actual_reps_left) || 0,
-                actual_reps_right: parseInt(actual_reps_right) || 0,
-                total: total_reps,
-                accuracy_percent: parseFloat(accuracy_percent) || 0,
-                duration_seconds: parseInt(duration_seconds) || 0,
-                saved_time: checkTime[0]?.saved_time,
-                thai_time: checkTime[0]?.thai_time
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Error:', error);
-        if (connection) await connection.end();
-        res.status(500).json({ 
-            success: false, 
-            message: 'เกิดข้อผิดพลาด',
-            error: error.message 
-        });
+      const [exercises] = await connection.execute(
+        'SELECT exercise_id FROM Exercises WHERE exercise_name = ? LIMIT 1',
+        [exercise_name]
+      );
+      if (exercises.length > 0) {
+        exercise_id = exercises[0].exercise_id;
+      }
+    } catch (e) {
+      console.log('⚠️ Exercises table not found, using null for exercise_id');
     }
+    
+    // หา plan_id ล่าสุดของผู้ป่วย (ถ้ามีตาราง Treatment_Plans)
+    let plan_id = null;
+    try {
+      const [plans] = await connection.execute(
+        'SELECT plan_id FROM Treatment_Plans WHERE patient_id = ? ORDER BY created_at DESC LIMIT 1',
+        [userId]
+      );
+      if (plans.length > 0) {
+        plan_id = plans[0].plan_id;
+      }
+    } catch (e) {
+      console.log('⚠️ Treatment_Plans table not found, using null for plan_id');
+    }
+    
+    // บันทึกข้อมูล
+    const [result] = await connection.execute(
+      `INSERT INTO Exercise_Sessions (
+        patient_id,
+        plan_id,
+        exercise_id,
+        session_date,
+        actual_reps_left,
+        actual_reps_right,
+        actual_reps,
+        actual_sets,
+        accuracy_percent,
+        duration_seconds,
+        notes
+      ) VALUES (?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
+      [
+        userId,
+        plan_id,
+        exercise_id,
+        left_count || 0,
+        right_count || 0,
+        actual_reps || 0,
+        accuracy || 0,
+        session_duration || 0,
+        `${exercise_name} (${exercise_type})`
+      ]
+    );
+    
+    console.log('✅ บันทึกสำเร็จ session_id:', result.insertId);
+    
+    res.status(201).json({
+      success: true,
+      message: 'บันทึกข้อมูลการฝึกสำเร็จ',
+      data: {
+        session_id: result.insertId,
+        patient_id: userId,
+        exercise_name: exercise_name,
+        actual_reps: actual_reps,
+        left_count: left_count,
+        right_count: right_count
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error saving exercise session:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล',
+      error: error.message
+    });
+  } finally {
+    if (connection) await connection.end();
+  }
 });
 // ========================
 // 7. ดูประวัติการฝึก
 // ========================
 app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
-  const connection = await createConnection();
+  let connection;
   
   try {
-    const [patients] = await connection.execute(
-      'SELECT patient_id FROM Patients WHERE user_id = ?',
-      [req.user.user_id]
+    const userId = req.user.user_id;
+    const { limit = 50, offset = 0 } = req.query;
+    
+    console.log('📊 ดึงข้อมูลการฝึกของ user_id:', userId);
+    
+    connection = await createConnection();
+    
+    // ดึงข้อมูลพร้อม JOIN กับตาราง Exercises (ถ้ามี)
+    const [sessions] = await connection.execute(
+      `SELECT 
+        es.session_id,
+        es.patient_id,
+        es.session_date,
+        es.actual_reps_left,
+        es.actual_reps_right,
+        es.actual_reps,
+        es.actual_sets,
+        es.accuracy_percent,
+        es.duration_seconds,
+        es.notes,
+        COALESCE(e.exercise_name, SUBSTRING_INDEX(es.notes, ' (', 1)) as exercise_name
+      FROM Exercise_Sessions es
+      LEFT JOIN Exercises e ON es.exercise_id = e.exercise_id
+      WHERE es.patient_id = ?
+      ORDER BY es.session_date DESC, es.session_id DESC
+      LIMIT ? OFFSET ?`,
+      [userId, parseInt(limit), parseInt(offset)]
     );
     
-    if (patients.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'ไม่พบข้อมูลผู้ป่วย' 
-      });
-    }
+    // นับจำนวนทั้งหมด
+    const [countResult] = await connection.execute(
+      'SELECT COUNT(*) as total FROM Exercise_Sessions WHERE patient_id = ?',
+      [userId]
+    );
     
-    const patientId = patients[0].patient_id;
-
-    const [sessions] = await connection.execute(`
-      SELECT 
-          es.session_id,
-          es.session_date,
-          es.actual_reps,
-          es.actual_reps_left,
-          es.actual_reps_right,
-          es.accuracy_percent,
-          es.duration_seconds,
-          es.notes,
-          e.name_th as exercise_name_th,
-          e.name_en as exercise_name_en
-      FROM Exercise_Sessions es
-      JOIN Exercises e ON es.exercise_id = e.exercise_id
-      WHERE es.patient_id = ?
-      ORDER BY es.session_date DESC
-      LIMIT 50
-    `, [patientId]);
-
+    const total = countResult[0].total;
+    
+    console.log('✅ พบข้อมูล', sessions.length, 'รายการ จากทั้งหมด', total, 'รายการ');
+    
     res.json({
       success: true,
+      message: 'ดึงข้อมูลสำเร็จ',
       data: sessions,
-      total: sessions.length
+      pagination: {
+        total: total,
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        hasMore: (parseInt(offset) + sessions.length) < total
+      }
     });
-
+    
   } catch (error) {
-    console.error('❌ Error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'เกิดข้อผิดพลาด' 
+    console.error('❌ Error fetching exercise sessions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการดึงข้อมูล',
+      error: error.message
     });
   } finally {
-    await connection.end();
+    if (connection) await connection.end();
   }
 });
 
 // ========================
 // 8. ดูสถิติการฝึก
 // ========================
-app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
-  const connection = await createConnection();
+app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
+  let connection;
   
   try {
-    const [patients] = await connection.execute(
-      'SELECT patient_id FROM Patients WHERE user_id = ?',
-      [req.user.user_id]
-    );
+    const userId = req.user.user_id;
+    const { period = '7days' } = req.query;
     
-    if (patients.length === 0) {
-      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้ป่วย' });
+    console.log('📈 ดึงสถิติการฝึกของ user_id:', userId, 'ช่วงเวลา:', period);
+    
+    connection = await createConnection();
+    
+    // กำหนดช่วงเวลา
+    let dateFilter = '';
+    if (period === '7days') {
+      dateFilter = 'AND session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
+    } else if (period === '30days') {
+      dateFilter = 'AND session_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
     }
     
-    const patientId = patients[0].patient_id;
-
-    // ✅ เพิ่มฟิลด์ชื่อท่าและข้อมูลซ้าย-ขวา
-    const [sessions] = await connection.execute(`
-      SELECT 
-          es.session_id,
-          es.patient_id,
-          es.exercise_id,
-          es.plan_id,
-          es.session_date,
-          es.actual_reps,
-          es.actual_reps_left,
-          es.actual_reps_right,
-          es.accuracy_percent,
-          es.duration_seconds,
-          es.notes,
-          e.name_th as exercise_name_th,
-          e.name_en as exercise_name_en,
-          e.description
+    // สถิติรวม
+    const [stats] = await connection.execute(
+      `SELECT 
+        COUNT(*) as total_sessions,
+        SUM(actual_reps) as total_reps,
+        SUM(actual_reps_left) as total_left_reps,
+        SUM(actual_reps_right) as total_right_reps,
+        AVG(accuracy_percent) as avg_accuracy,
+        SUM(duration_seconds) as total_duration,
+        COUNT(*) as completed_sessions
+      FROM Exercise_Sessions
+      WHERE patient_id = ? ${dateFilter}`,
+      [userId]
+    );
+    
+    // สถิติแยกตามประเภทท่า
+    const [byExercise] = await connection.execute(
+      `SELECT 
+        COALESCE(e.exercise_name, SUBSTRING_INDEX(es.notes, ' (', 1)) as exercise_name,
+        COUNT(*) as session_count,
+        SUM(es.actual_reps) as total_reps,
+        AVG(es.accuracy_percent) as avg_accuracy
       FROM Exercise_Sessions es
-      JOIN Exercises e ON es.exercise_id = e.exercise_id
-      JOIN ExercisePlans ep ON es.plan_id = ep.plan_id
-      WHERE es.patient_id = ?
-      ORDER BY es.session_date DESC
-      LIMIT 50
-    `, [patientId]);
-
-    console.log('✅ Loaded sessions:', {
-      count: sessions.length,
-      sample: sessions[0] ? {
-        exercise_name_th: sessions[0].exercise_name_th,
-        exercise_name_en: sessions[0].exercise_name_en,
-        left: sessions[0].actual_reps_left,
-        right: sessions[0].actual_reps_right,
-        total: sessions[0].actual_reps,
-        date: sessions[0].session_date
-      } : null
-    });
-
+      LEFT JOIN Exercises e ON es.exercise_id = e.exercise_id
+      WHERE es.patient_id = ? ${dateFilter}
+      GROUP BY e.exercise_name, SUBSTRING_INDEX(es.notes, ' (', 1)
+      ORDER BY session_count DESC`,
+      [userId]
+    );
+    
+    // สถิติรายวัน (7 วันล่าสุด)
+    const [dailyStats] = await connection.execute(
+      `SELECT 
+        DATE(session_date) as exercise_date,
+        COUNT(*) as session_count,
+        SUM(actual_reps) as total_reps,
+        AVG(accuracy_percent) as avg_accuracy
+      FROM Exercise_Sessions
+      WHERE patient_id = ?
+      AND session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+      GROUP BY DATE(session_date)
+      ORDER BY exercise_date DESC`,
+      [userId]
+    );
+    
+    console.log('✅ ดึงสถิติสำเร็จ');
+    
     res.json({
       success: true,
-      data: sessions,
-      total: sessions.length
+      message: 'ดึงสถิติสำเร็จ',
+      data: {
+        summary: stats[0],
+        by_exercise: byExercise,
+        daily: dailyStats,
+        period: period
+      }
     });
-
+    
   } catch (error) {
-    console.error('❌ Error:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด' });
+    console.error('❌ Error fetching stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการดึงสถิติ',
+      error: error.message
+    });
   } finally {
-    await connection.end();
+    if (connection) await connection.end();
   }
 });
+
 // ========================
 // จัดการข้อผิดพลาด
 // ========================
