@@ -423,6 +423,13 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
       emergency_contact_phone, emergency_contact_relation
     } = req.body;
 
+    // ✅ เพิ่ม debug log
+    console.log('📝 Update request for user:', userId);
+    console.log('📊 Received data:', {
+      first_name, last_name, gender, weight, height,
+      injured_side, injured_part, birth_date
+    });
+
     await connection.beginTransaction();
 
     // อัพเดท Users
@@ -432,66 +439,151 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
         'UPDATE Users SET full_name = ?, updated_at = NOW() WHERE user_id = ?',
         [nameToUpdate, userId]
       );
+      console.log('✅ Updated Users table');
     }
 
     // อัพเดท Patients
     const updates = [];
     const values = [];
 
-    if (first_name) { 
+    // ✅ ตรวจสอบและเพิ่มฟิลด์ที่จำเป็น
+    if (first_name !== undefined && first_name.trim() !== '') { 
       updates.push('first_name = ?'); 
       values.push(first_name.substring(0, 50)); 
     }
-    if (last_name) { 
+    
+    if (last_name !== undefined && last_name.trim() !== '') { 
       updates.push('last_name = ?'); 
       values.push(last_name.substring(0, 50)); 
     }
-    if (birth_date) { 
+    
+    if (birth_date !== undefined && birth_date.trim() !== '') { 
       updates.push('birth_date = ?'); 
       values.push(birth_date); 
     }
-    if (gender) { 
-      updates.push('gender = ?'); 
-      values.push(gender); 
+    
+    // ✅ แก้ไขการตรวจสอบ gender
+    if (gender !== undefined && gender.trim() !== '') { 
+      const validGenders = ['ชาย', 'หญิง', 'อื่นๆ', 'Male', 'Female', 'Other'];
+      if (validGenders.includes(gender)) {
+        updates.push('gender = ?'); 
+        values.push(gender); 
+      } else {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `เพศไม่ถูกต้อง: ${gender}. ต้องเป็น: ชาย, หญิง, หรือ อื่นๆ`
+        });
+      }
     }
+    
+    // ✅ แก้ไขการจัดการ weight และ height
     if (weight !== undefined) { 
-      updates.push('weight = ?'); 
-      values.push(weight ? parseFloat(weight) : null); 
+      const weightNum = parseFloat(weight);
+      if (!isNaN(weightNum) && weightNum > 0) {
+        updates.push('weight = ?'); 
+        values.push(Math.min(999.99, Math.max(0.01, weightNum))); 
+      } else if (weight === '' || weight === null) {
+        updates.push('weight = ?');
+        values.push(null);
+      }
     }
+    
     if (height !== undefined) { 
-      updates.push('height = ?'); 
-      values.push(height ? parseFloat(height) : null); 
+      const heightNum = parseFloat(height);
+      if (!isNaN(heightNum) && heightNum > 0) {
+        updates.push('height = ?'); 
+        values.push(Math.min(999.99, Math.max(0.01, heightNum))); 
+      } else if (height === '' || height === null) {
+        updates.push('height = ?');
+        values.push(null);
+      }
     }
-    if (injured_side) { 
-      updates.push('injured_side = ?'); 
-      values.push(injured_side); 
+    
+    // ✅ แก้ไขการตรวจสอบ injured_side
+    if (injured_side !== undefined && injured_side.trim() !== '') {
+      const validSides = ['ซ้าย', 'ขวา', 'ทั้งสองข้าง', 'Left', 'Right', 'Both'];
+      if (validSides.includes(injured_side)) {
+        updates.push('injured_side = ?'); 
+        values.push(injured_side); 
+      } else {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `ด้านที่บาดเจ็บไม่ถูกต้อง: ${injured_side}. ต้องเป็น: ซ้าย, ขวา, หรือ ทั้งสองข้าง`
+        });
+      }
     }
-    if (injured_part) { 
-      updates.push('injured_part = ?'); 
-      values.push(injured_part); 
+    
+    // ✅ แก้ไขการตรวจสอบ injured_part
+    if (injured_part !== undefined && injured_part.trim() !== '') {
+      const validParts = ['แขน', 'ขา', 'ลำตัว', 'หัว', 'อื่นๆ', 'Arm', 'Leg', 'Trunk', 'Head', 'Other'];
+      if (validParts.includes(injured_part)) {
+        updates.push('injured_part = ?'); 
+        values.push(injured_part); 
+      } else {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `ส่วนที่บาดเจ็บไม่ถูกต้อง: ${injured_part}. ต้องเป็น: แขน, ขา, ลำตัว, หัว, หรือ อื่นๆ`
+        });
+      }
     }
+    
     if (emergency_contact_name !== undefined) { 
       updates.push('emergency_contact_name = ?'); 
-      values.push(emergency_contact_name || null); 
+      values.push(emergency_contact_name && emergency_contact_name.trim() !== '' ? emergency_contact_name.substring(0, 100) : null); 
     }
+    
     if (emergency_contact_phone !== undefined) { 
-      updates.push('emergency_contact_phone = ?'); 
-      values.push(emergency_contact_phone || null); 
+      if (emergency_contact_phone && emergency_contact_phone.trim() !== '') {
+        const cleanPhone = emergency_contact_phone.replace(/\D/g, '').substring(0, 10); // ✅ ตัดที่ 10 ตัว
+        if (/^\d{10}$/.test(cleanPhone)) {
+          updates.push('emergency_contact_phone = ?'); 
+          values.push(cleanPhone); 
+        } else {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: 'เบอร์โทรศัพท์ผู้ติดต่อฉุกเฉินไม่ถูกต้อง (ต้องเป็นตัวเลข 10 หลัก)'
+          });
+        }
+      } else {
+        updates.push('emergency_contact_phone = ?'); 
+        values.push(null); 
+      }
     }
+    
     if (emergency_contact_relation !== undefined) { 
       updates.push('emergency_contact_relation = ?'); 
-      values.push(emergency_contact_relation || null); 
+      values.push(emergency_contact_relation && emergency_contact_relation.trim() !== '' ? emergency_contact_relation.substring(0, 50) : null); 
     }
 
+    // ✅ เพิ่มการตรวจสอบก่อน execute
     if (updates.length > 0) {
       values.push(userId);
-      await connection.execute(
-        `UPDATE Patients SET ${updates.join(', ')} WHERE user_id = ?`,
-        values
-      );
+      const updateQuery = `UPDATE Patients SET ${updates.join(', ')} WHERE user_id = ?`;
+      
+      console.log('📝 Update query:', updateQuery);
+      console.log('📊 Update values:', values);
+      
+      try {
+        await connection.execute(updateQuery, values);
+        console.log('✅ Updated Patients table successfully');
+      } catch (updateError) {
+        console.error('❌ Update query failed:', updateError);
+        await connection.rollback();
+        return res.status(500).json({
+          success: false,
+          message: 'เกิดข้อผิดพลาดในการอัพเดทข้อมูล: ' + updateError.message
+        });
+      }
+    } else {
+      console.log('⚠️ No fields to update');
     }
 
     await connection.commit();
+    console.log('✅ Transaction committed');
 
     res.json({
       success: true,
@@ -501,9 +593,23 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('❌ Profile update error:', error);
+    
+    // ✅ ส่งข้อความ error ที่ละเอียด
+    let errorMessage = 'เกิดข้อผิดพลาดในการอัพเดทข้อมูล';
+    
+    if (error.code === 'ER_BAD_NULL_ERROR') {
+      errorMessage = 'ข้อมูลที่จำเป็นไม่ครบถ้วน';
+    } else if (error.code === 'ER_DATA_TOO_LONG') {
+      errorMessage = 'ข้อมูลยาวเกินไป';
+    } else if (error.message && error.message.includes('Data truncated')) {
+      errorMessage = 'รูปแบบข้อมูลไม่ถูกต้อง';
+    }
+    
     res.status(500).json({
       success: false,
-      message: 'เกิดข้อผิดพลาดในการอัพเดทข้อมูล'
+      message: errorMessage,
+      error_code: error.code,
+      error_detail: error.message // ✅ เพิ่มเพื่อ debug
     });
   } finally {
     await connection.end();
