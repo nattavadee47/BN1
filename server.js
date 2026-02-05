@@ -852,65 +852,90 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
 // 7. ดูประวัติการฝึก
 // ========================
 app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
-  let connection;
-  
   try {
-    const userId = req.user.user_id;
-    const { limit = 50, offset = 0 } = req.query;
-    
-    console.log('📊 ดึงข้อมูลของ user_id:', userId);
-    
-    connection = await createConnection();
-    
-    const [sessions] = await connection.execute(
-      `SELECT 
-        session_id,
-        patient_id,
-        session_date,
-        actual_reps_left,
-        actual_reps_right,
-        actual_reps,
-        actual_sets,
-        accuracy_percent,
-        duration_seconds,
-        notes,
-        SUBSTRING_INDEX(notes, ' (', 1) as exercise_name
-      FROM Exercise_Sessions
-      WHERE patient_id = ?
-      ORDER BY session_date DESC, session_id DESC
-      LIMIT ? OFFSET ?`,
-      [userId, parseInt(limit), parseInt(offset)]
-    );
-    
-    const [countResult] = await connection.execute(
-      'SELECT COUNT(*) as total FROM Exercise_Sessions WHERE patient_id = ?',
-      [userId]
-    );
-    
-    console.log('✅ พบ', sessions.length, 'รายการ');
-    
-    res.json({
-      success: true,
-      message: 'ดึงข้อมูลสำเร็จ',
-      data: sessions,
-      pagination: {
-        total: countResult[0].total,
-        limit: parseInt(limit),
-        offset: parseInt(offset)
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ Error fetching sessions:', error);
-    res.status(500).json({
-      success: false,
-      message: 'เกิดข้อผิดพลาดในการดึงข้อมูล',
-      error: error.message
-    });
-  } finally {
-    if (connection) await connection.end();
-  }
+        const userId = req.user.user_id;
+        
+        // ✅ กำหนดค่า default และแปลงเป็น integer
+        const limit = parseInt(req.query.limit) || 100;      // default 100
+        const offset = parseInt(req.query.offset) || 0;      // default 0
+        const period = req.query.period || '7days';          // default 7 days
+        
+        console.log('📊 Query params:', { userId, limit, offset, period });
+        
+        // ✅ Validate ค่า limit (ป้องกันค่าที่ไม่ถูกต้อง)
+        if (limit < 1 || limit > 1000) {
+            return res.status(400).json({
+                success: false,
+                message: 'limit ต้องอยู่ระหว่าง 1-1000'
+            });
+        }
+
+        // คำนวณช่วงเวลา
+        let dateFilter = '';
+        if (period === '7days') {
+            dateFilter = 'AND es.session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
+        } else if (period === '30days') {
+            dateFilter = 'AND es.session_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
+        } else if (period === '90days') {
+            dateFilter = 'AND es.session_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)';
+        }
+        // period === 'all' ไม่ต้องกรอง
+
+        // ✅ SQL Query ที่ถูกต้อง
+        const query = `
+            SELECT 
+                es.session_id,
+                es.patient_id,
+                es.plan_id,
+                es.exercise_id,
+                es.session_date,
+                es.actual_reps_left,
+                es.actual_reps_right,
+                es.actual_reps,
+                es.actual_sets,
+                es.accuracy_percent,
+                es.duration_seconds,
+                es.notes,
+                es.completed,
+                es.created_at,
+                e.name_th as exercise_name_th,
+                e.name_en as exercise_name_en,
+                e.description
+            FROM Exercise_Sessions es
+            LEFT JOIN Exercises e ON es.exercise_id = e.exercise_id
+            WHERE es.patient_id = ?
+            ${dateFilter}
+            ORDER BY es.session_date DESC
+            LIMIT ? OFFSET ?
+        `;
+
+        console.log('📝 Executing query with params:', [userId, limit, offset]);
+
+        // ✅ Execute query with validated parameters
+        const [rows] = await pool.execute(query, [userId, limit, offset]);
+
+        console.log(`✅ พบข้อมูล ${rows.length} sessions`);
+
+        res.json({
+            success: true,
+            data: rows,
+            count: rows.length,
+            period: period,
+            limit: limit,
+            offset: offset,
+            message: 'ดึงข้อมูลสำเร็จ'
+        });
+
+    } catch (error) {
+        console.error('❌ Error fetching exercise sessions:', error);
+        res.status(500).json({
+            success: false,
+            message: 'เกิดข้อผิดพลาดในการดึงข้อมูล',
+            error: error.message
+        });
+    }
 });
+
 // ========================
 // 8. ดูสถิติการฝึก
 // ========================
