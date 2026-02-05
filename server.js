@@ -741,14 +741,14 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
     const userId = req.user.user_id;
     
     const {
-      exercise_type,
-      exercise_name,
-      actual_reps,
-      target_reps,
-      accuracy,
-      session_duration,
-      left_count,
-      right_count
+      exercise_type = 'unknown',
+      exercise_name = 'ท่าการฝึก',
+      actual_reps = 0,
+      target_reps = 10,
+      accuracy = 0,
+      session_duration = 0,
+      left_count = 0,
+      right_count = 0
     } = req.body;
     
     console.log('💾 บันทึกข้อมูลการฝึก:', {
@@ -761,35 +761,40 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
     
     connection = await createConnection();
     
-    // หา exercise_id จากชื่อท่า (ถ้ามีตาราง Exercises)
-    let exercise_id = null;
-    try {
-      const [exercises] = await connection.execute(
-        'SELECT exercise_id FROM Exercises WHERE exercise_name = ? LIMIT 1',
-        [exercise_name]
-      );
-      if (exercises.length > 0) {
-        exercise_id = exercises[0].exercise_id;
-      }
-    } catch (e) {
-      console.log('⚠️ Exercises table not found, using null for exercise_id');
-    }
+    // ✅ แก้ไข: หา plan_id หรือสร้างใหม่
+    let plan_id = 1; // default
     
-    // หา plan_id ล่าสุดของผู้ป่วย (ถ้ามีตาราง Treatment_Plans)
-    let plan_id = null;
     try {
-      const [plans] = await connection.execute(
+      // หา plan ที่มีอยู่
+      const [existingPlans] = await connection.execute(
         'SELECT plan_id FROM Treatment_Plans WHERE patient_id = ? ORDER BY created_at DESC LIMIT 1',
         [userId]
       );
-      if (plans.length > 0) {
-        plan_id = plans[0].plan_id;
+      
+      if (existingPlans.length > 0) {
+        plan_id = existingPlans[0].plan_id;
+        console.log('✅ ใช้ plan_id:', plan_id);
+      } else {
+        // สร้าง plan ใหม่
+        const [newPlan] = await connection.execute(
+          `INSERT INTO Treatment_Plans (
+            patient_id, 
+            therapist_id, 
+            plan_name, 
+            start_date
+          ) VALUES (?, 1, 'แผนการฟื้นฟูอัตโนมัติ', CURRENT_DATE)`,
+          [userId]
+        );
+        plan_id = newPlan.insertId;
+        console.log('✅ สร้าง plan_id ใหม่:', plan_id);
       }
-    } catch (e) {
-      console.log('⚠️ Treatment_Plans table not found, using null for plan_id');
+    } catch (planError) {
+      // ถ้าตาราง Treatment_Plans ไม่มี ให้ใช้ค่า default
+      console.log('⚠️ ใช้ plan_id = 1 (default)');
+      plan_id = 1;
     }
     
-    // บันทึกข้อมูล
+    // ✅ บันทึกข้อมูล
     const [result] = await connection.execute(
       `INSERT INTO Exercise_Sessions (
         patient_id,
@@ -803,16 +808,15 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
         accuracy_percent,
         duration_seconds,
         notes
-      ) VALUES (?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
+      ) VALUES (?, ?, NULL, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
       [
         userId,
         plan_id,
-        exercise_id,
-        left_count || 0,
-        right_count || 0,
-        actual_reps || 0,
-        accuracy || 0,
-        session_duration || 0,
+        left_count,
+        right_count,
+        actual_reps,
+        accuracy,
+        session_duration,
         `${exercise_name} (${exercise_type})`
       ]
     );
@@ -833,7 +837,7 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Error saving exercise session:', error);
+    console.error('❌ Error saving session:', error);
     res.status(500).json({
       success: false,
       message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล',
@@ -843,6 +847,7 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
     if (connection) await connection.end();
   }
 });
+
 // ========================
 // 7. ดูประวัติการฝึก
 // ========================
@@ -853,56 +858,50 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
     const userId = req.user.user_id;
     const { limit = 50, offset = 0 } = req.query;
     
-    console.log('📊 ดึงข้อมูลการฝึกของ user_id:', userId);
+    console.log('📊 ดึงข้อมูลของ user_id:', userId);
     
     connection = await createConnection();
     
-    // ดึงข้อมูลพร้อม JOIN กับตาราง Exercises (ถ้ามี)
     const [sessions] = await connection.execute(
       `SELECT 
-        es.session_id,
-        es.patient_id,
-        es.session_date,
-        es.actual_reps_left,
-        es.actual_reps_right,
-        es.actual_reps,
-        es.actual_sets,
-        es.accuracy_percent,
-        es.duration_seconds,
-        es.notes,
-        COALESCE(e.exercise_name, SUBSTRING_INDEX(es.notes, ' (', 1)) as exercise_name
-      FROM Exercise_Sessions es
-      LEFT JOIN Exercises e ON es.exercise_id = e.exercise_id
-      WHERE es.patient_id = ?
-      ORDER BY es.session_date DESC, es.session_id DESC
+        session_id,
+        patient_id,
+        session_date,
+        actual_reps_left,
+        actual_reps_right,
+        actual_reps,
+        actual_sets,
+        accuracy_percent,
+        duration_seconds,
+        notes,
+        SUBSTRING_INDEX(notes, ' (', 1) as exercise_name
+      FROM Exercise_Sessions
+      WHERE patient_id = ?
+      ORDER BY session_date DESC, session_id DESC
       LIMIT ? OFFSET ?`,
       [userId, parseInt(limit), parseInt(offset)]
     );
     
-    // นับจำนวนทั้งหมด
     const [countResult] = await connection.execute(
       'SELECT COUNT(*) as total FROM Exercise_Sessions WHERE patient_id = ?',
       [userId]
     );
     
-    const total = countResult[0].total;
-    
-    console.log('✅ พบข้อมูล', sessions.length, 'รายการ จากทั้งหมด', total, 'รายการ');
+    console.log('✅ พบ', sessions.length, 'รายการ');
     
     res.json({
       success: true,
       message: 'ดึงข้อมูลสำเร็จ',
       data: sessions,
       pagination: {
-        total: total,
+        total: countResult[0].total,
         limit: parseInt(limit),
-        offset: parseInt(offset),
-        hasMore: (parseInt(offset) + sessions.length) < total
+        offset: parseInt(offset)
       }
     });
     
   } catch (error) {
-    console.error('❌ Error fetching exercise sessions:', error);
+    console.error('❌ Error fetching sessions:', error);
     res.status(500).json({
       success: false,
       message: 'เกิดข้อผิดพลาดในการดึงข้อมูล',
@@ -912,7 +911,6 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
     if (connection) await connection.end();
   }
 });
-
 // ========================
 // 8. ดูสถิติการฝึก
 // ========================
@@ -923,11 +921,10 @@ app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
     const userId = req.user.user_id;
     const { period = '7days' } = req.query;
     
-    console.log('📈 ดึงสถิติการฝึกของ user_id:', userId, 'ช่วงเวลา:', period);
+    console.log('📈 ดึงสถิติของ user_id:', userId);
     
     connection = await createConnection();
     
-    // กำหนดช่วงเวลา
     let dateFilter = '';
     if (period === '7days') {
       dateFilter = 'AND session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
@@ -935,7 +932,6 @@ app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
       dateFilter = 'AND session_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
     }
     
-    // สถิติรวม
     const [stats] = await connection.execute(
       `SELECT 
         COUNT(*) as total_sessions,
@@ -943,29 +939,25 @@ app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
         SUM(actual_reps_left) as total_left_reps,
         SUM(actual_reps_right) as total_right_reps,
         AVG(accuracy_percent) as avg_accuracy,
-        SUM(duration_seconds) as total_duration,
-        COUNT(*) as completed_sessions
+        SUM(duration_seconds) as total_duration
       FROM Exercise_Sessions
       WHERE patient_id = ? ${dateFilter}`,
       [userId]
     );
     
-    // สถิติแยกตามประเภทท่า
     const [byExercise] = await connection.execute(
       `SELECT 
-        COALESCE(e.exercise_name, SUBSTRING_INDEX(es.notes, ' (', 1)) as exercise_name,
+        SUBSTRING_INDEX(notes, ' (', 1) as exercise_name,
         COUNT(*) as session_count,
-        SUM(es.actual_reps) as total_reps,
-        AVG(es.accuracy_percent) as avg_accuracy
-      FROM Exercise_Sessions es
-      LEFT JOIN Exercises e ON es.exercise_id = e.exercise_id
-      WHERE es.patient_id = ? ${dateFilter}
-      GROUP BY e.exercise_name, SUBSTRING_INDEX(es.notes, ' (', 1)
+        SUM(actual_reps) as total_reps,
+        AVG(accuracy_percent) as avg_accuracy
+      FROM Exercise_Sessions
+      WHERE patient_id = ? ${dateFilter}
+      GROUP BY SUBSTRING_INDEX(notes, ' (', 1)
       ORDER BY session_count DESC`,
       [userId]
     );
     
-    // สถิติรายวัน (7 วันล่าสุด)
     const [dailyStats] = await connection.execute(
       `SELECT 
         DATE(session_date) as exercise_date,
@@ -994,7 +986,7 @@ app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Error fetching stats:', error);
+    console.error('❌ Error stats:', error);
     res.status(500).json({
       success: false,
       message: 'เกิดข้อผิดพลาดในการดึงสถิติ',
