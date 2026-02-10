@@ -734,6 +734,7 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
 // ========================
 // 6. บันทึกผลการฝึก
 // ========================
+
 app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
   let connection;
 
@@ -900,48 +901,47 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
   let connection;
 
   try {
-    const userId = req.user.user_id;
+    console.log('✅ Token verified:', { user_id: req.user.user_id, role: req.user.role });
 
-    // ----------------------------
-    // 1) parse + default params
-    // ----------------------------
-    const limit = Number.parseInt(req.query.limit, 10) || 100;
-    const offset = Number.parseInt(req.query.offset, 10) || 0;
-    const period = req.query.period || '7days';
+    const userId = Number(req.user.user_id);
 
-    // validate
-    if (!Number.isInteger(limit) || !Number.isInteger(offset)) {
-      return res.status(400).json({
-        success: false,
-        message: 'limit และ offset ต้องเป็นตัวเลข'
-      });
-    }
+    // 1) Parse + validate params
+    const period = (req.query.period || '7days').toString();
+    let limit = Number.parseInt(req.query.limit, 10);
+    let offset = Number.parseInt(req.query.offset, 10);
 
-    if (limit < 1 || limit > 1000 || offset < 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'ค่า limit / offset ไม่ถูกต้อง'
-      });
-    }
+    if (!Number.isFinite(limit) || !Number.isInteger(limit)) limit = 100;
+    if (!Number.isFinite(offset) || !Number.isInteger(offset)) offset = 0;
 
-    // ----------------------------
-    // 2) date filter
-    // ----------------------------
+    if (limit < 1) limit = 1;
+    if (limit > 1000) limit = 1000;
+    if (offset < 0) offset = 0;
+
+    // 2) Date filter
     let dateCondition = '';
-    if (period === '7days') {
-      dateCondition = 'AND es.session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
-    } else if (period === '30days') {
-      dateCondition = 'AND es.session_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
-    } else if (period === '90days') {
-      dateCondition = 'AND es.session_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)';
+    if (period === '7days') dateCondition = 'AND es.session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
+    else if (period === '30days') dateCondition = 'AND es.session_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
+    else if (period === '90days') dateCondition = 'AND es.session_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)';
+
+    connection = await createConnection();
+
+    // 3) IMPORTANT: map user_id -> Patients.patient_id
+    const [pRows] = await connection.execute(
+      'SELECT patient_id FROM Patients WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+
+    if (!pRows || pRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'ไม่พบข้อมูลผู้ป่วยในตาราง Patients (user_id นี้ยังไม่มี patient_id)',
+      });
     }
 
-    // ----------------------------
-    // 3) SQL (สำคัญมาก)
-    // - ไม่มี es.completed
-    // - ไม่มี es.created_at
-    // - LIMIT / OFFSET ใส่เป็นตัวเลขตรง ๆ
-    // ----------------------------
+    const patientId = Number(pRows[0].patient_id);
+
+    // 4) Query (อย่า select es.completed / es.created_at ถ้าไม่มีจริง)
+    // NOTE: ฝัง LIMIT/OFFSET หลัง validate เพื่อตัดปัญหา Incorrect arguments to LIMIT
     const query = `
       SELECT
         es.session_id,
@@ -958,11 +958,8 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
         es.notes,
         e.name_th AS exercise_name_th,
         e.name_en AS exercise_name_en,
-        COALESCE(
-          e.name_th,
-          SUBSTRING_INDEX(es.notes, ' - ', 1),
-          'ท่ากายภาพ'
-        ) AS exercise_name
+        e.description,
+        COALESCE(e.name_th, SUBSTRING_INDEX(es.notes, ' (', 1), 'ท่ากายภาพ') AS exercise_name
       FROM Exercise_Sessions es
       LEFT JOIN Exercises e ON es.exercise_id = e.exercise_id
       WHERE es.patient_id = ?
@@ -971,27 +968,28 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
       LIMIT ${limit} OFFSET ${offset}
     `;
 
-    // ----------------------------
-    // 4) execute
-    // ----------------------------
-    connection = await createConnection();
-    const [rows] = await connection.execute(query, [userId]);
+    console.log('📝 Executing query with params:', [patientId], { userId, patientId, limit, offset, period });
 
-    return res.json({
+    const [rows] = await connection.execute(query, [patientId]);
+
+    console.log(`✅ ดึงข้อมูลสำเร็จ: ${rows.length} sessions`);
+
+    res.json({
       success: true,
       data: rows,
       count: rows.length,
+      period,
       limit,
       offset,
-      period
+      patient_id: patientId,
+      message: 'ดึงข้อมูลสำเร็จ',
     });
-
   } catch (error) {
-    console.error('❌ GET /api/exercise-sessions error:', error);
-    return res.status(500).json({
+    console.error('❌ Error fetching sessions:', error);
+    res.status(500).json({
       success: false,
       message: 'เกิดข้อผิดพลาดในการดึงข้อมูล',
-      error: error.message
+      error: error.message,
     });
   } finally {
     if (connection) await connection.end();
