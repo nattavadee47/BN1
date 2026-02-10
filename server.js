@@ -1022,81 +1022,95 @@ app.get('/api/exercise-sessions', authenticateToken, async (req, res) => {
 // ========================
 app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
   let connection;
-  
+
   try {
-    const userId = req.user.user_id;
+    const userId = Number(req.user.user_id);
     const { period = '7days' } = req.query;
-    
+
     console.log('📈 ดึงสถิติของ user_id:', userId);
-    
+
     connection = await createConnection();
-    
-    let dateFilter = '';
-    if (period === '7days') {
-      dateFilter = 'AND session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
-    } else if (period === '30days') {
-      dateFilter = 'AND session_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
+
+    // ✅ map user_id -> Patients.patient_id
+    const [pRows] = await connection.execute(
+      'SELECT patient_id FROM Patients WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+
+    if (!pRows || pRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'ไม่พบ patient_id ในตาราง Patients สำหรับ user_id นี้',
+      });
     }
-    
+
+    const patientId = Number(pRows[0].patient_id);
+
+    let dateFilter = '';
+    if (period === '7days') dateFilter = 'AND session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
+    else if (period === '30days') dateFilter = 'AND session_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
+    else if (period === '90days') dateFilter = 'AND session_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)';
+
     const [stats] = await connection.execute(
       `SELECT 
         COUNT(*) as total_sessions,
-        SUM(actual_reps) as total_reps,
-        SUM(actual_reps_left) as total_left_reps,
-        SUM(actual_reps_right) as total_right_reps,
-        AVG(accuracy_percent) as avg_accuracy,
-        SUM(duration_seconds) as total_duration
+        COALESCE(SUM(actual_reps),0) as total_reps,
+        COALESCE(SUM(actual_reps_left),0) as total_left_reps,
+        COALESCE(SUM(actual_reps_right),0) as total_right_reps,
+        COALESCE(AVG(accuracy_percent),0) as avg_accuracy,
+        COALESCE(SUM(duration_seconds),0) as total_duration
       FROM Exercise_Sessions
       WHERE patient_id = ? ${dateFilter}`,
-      [userId]
+      [patientId]
     );
-    
+
     const [byExercise] = await connection.execute(
       `SELECT 
-        SUBSTRING_INDEX(notes, ' (', 1) as exercise_name,
+        COALESCE(e.name_th, SUBSTRING_INDEX(notes, ' - ', 1)) as exercise_name,
         COUNT(*) as session_count,
-        SUM(actual_reps) as total_reps,
-        AVG(accuracy_percent) as avg_accuracy
-      FROM Exercise_Sessions
-      WHERE patient_id = ? ${dateFilter}
-      GROUP BY SUBSTRING_INDEX(notes, ' (', 1)
+        COALESCE(SUM(actual_reps),0) as total_reps,
+        COALESCE(AVG(accuracy_percent),0) as avg_accuracy
+      FROM Exercise_Sessions es
+      LEFT JOIN Exercises e ON es.exercise_id = e.exercise_id
+      WHERE es.patient_id = ? ${dateFilter}
+      GROUP BY COALESCE(e.name_th, SUBSTRING_INDEX(notes, ' - ', 1))
       ORDER BY session_count DESC`,
-      [userId]
+      [patientId]
     );
-    
+
     const [dailyStats] = await connection.execute(
       `SELECT 
         DATE(session_date) as exercise_date,
         COUNT(*) as session_count,
-        SUM(actual_reps) as total_reps,
-        AVG(accuracy_percent) as avg_accuracy
+        COALESCE(SUM(actual_reps),0) as total_reps,
+        COALESCE(AVG(accuracy_percent),0) as avg_accuracy
       FROM Exercise_Sessions
-      WHERE patient_id = ?
-      AND session_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+      WHERE patient_id = ? ${dateFilter}
       GROUP BY DATE(session_date)
       ORDER BY exercise_date DESC`,
-      [userId]
+      [patientId]
     );
-    
+
     console.log('✅ ดึงสถิติสำเร็จ');
-    
-    res.json({
+
+    return res.json({
       success: true,
       message: 'ดึงสถิติสำเร็จ',
       data: {
         summary: stats[0],
         by_exercise: byExercise,
         daily: dailyStats,
-        period: period
-      }
+        period,
+        patient_id: patientId,
+      },
     });
-    
+
   } catch (error) {
     console.error('❌ Error stats:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'เกิดข้อผิดพลาดในการดึงสถิติ',
-      error: error.message
+      error: error.message,
     });
   } finally {
     if (connection) await connection.end();
