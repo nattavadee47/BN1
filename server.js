@@ -783,32 +783,49 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
     console.log('✅ Resolved patientId:', patientId, 'from userId:', userId);
 
     // ----------------------------
-    // ✅ 1) หา/สร้าง plan_id (ต้องใช้ patientId)
+    // ✅ 1) หา/สร้าง plan_id จากตาราง exerciseplans
+    //    Structure: plan_id(PK), patient_id(NOT NULL), physio_id(NOT NULL),
+    //               plan_name, start_date, end_date, notes
     // ----------------------------
-    let plan_id = 1;
+    let plan_id = null;
 
     try {
+      // ค้นหา plan ที่มีอยู่แล้วของ patient นี้
       const [existingPlans] = await connection.execute(
-        'SELECT plan_id FROM Treatment_Plans WHERE patient_id = ? ORDER BY created_at DESC LIMIT 1',
+        'SELECT plan_id FROM exerciseplans WHERE patient_id = ? ORDER BY plan_id DESC LIMIT 1',
         [patientId]
       );
 
       if (existingPlans.length > 0) {
         plan_id = existingPlans[0].plan_id;
-        console.log('✅ ใช้ plan_id:', plan_id);
+        console.log('✅ ใช้ plan_id จาก exerciseplans:', plan_id);
       } else {
+        // ต้องหา physio_id เพราะเป็น NOT NULL
+        // ดึง physio_id คนแรกที่มีในระบบ (default physio)
+        let physioId = 1;
+        try {
+          const [physios] = await connection.execute(
+            'SELECT physio_id FROM Physiotherapists ORDER BY physio_id ASC LIMIT 1'
+          );
+          if (physios.length > 0) {
+            physioId = physios[0].physio_id;
+            console.log('✅ ใช้ physio_id:', physioId);
+          }
+        } catch (e) {
+          console.warn('⚠️ หา physio_id ไม่ได้ ใช้ default = 1');
+        }
+
         const [newPlan] = await connection.execute(
-          `INSERT INTO Treatment_Plans (
-            patient_id, therapist_id, plan_name, start_date
-          ) VALUES (?, 1, 'แผนการฟื้นฟูอัตโนมัติ', CURRENT_DATE)`,
-          [patientId]
+          `INSERT INTO exerciseplans (patient_id, physio_id, plan_name, start_date)
+           VALUES (?, ?, 'แผนการฟื้นฟูอัตโนมัติ', CURRENT_DATE)`,
+          [patientId, physioId]
         );
         plan_id = newPlan.insertId;
-        console.log('✅ สร้าง plan_id ใหม่:', plan_id);
+        console.log('✅ สร้าง plan_id ใหม่ใน exerciseplans:', plan_id);
       }
     } catch (planError) {
-      console.log('⚠️ หา/สร้าง plan ไม่สำเร็จ ใช้ plan_id = 1 (default)');
-      plan_id = 1;
+      console.error('❌ หา/สร้าง plan_id ไม่สำเร็จ:', planError.message);
+      plan_id = null;
     }
 
     // ----------------------------
@@ -857,32 +874,31 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
 
     const notes = `${exercise_name} - ซ้าย:${safeLeft} ขวา:${safeRight} รวม:${safeActualReps} ครั้งใน ${safeDuration} วินาที`;
 
-    const [result] = await connection.execute(
-      `INSERT INTO Exercise_Sessions (
-        patient_id,
-        plan_id,
-        exercise_id,
-        session_date,
-        actual_reps_left,
-        actual_reps_right,
-        actual_reps,
-        actual_sets,
-        accuracy_percent,
-        duration_seconds,
-        notes
-      ) VALUES (?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
-      [
-        patientId,
-        plan_id,
-        resolvedExerciseId,
-        safeLeft,
-        safeRight,
-        safeActualReps,
-        safeAccuracy,
-        safeDuration,
-        notes,
-      ]
-    );
+    // ✅ INSERT แบบ conditional: ถ้าหา plan_id ได้ใส่, ถ้าไม่ได้ข้าม (plan_id = NULL)
+    let result;
+    if (plan_id) {
+      [result] = await connection.execute(
+        `INSERT INTO Exercise_Sessions (
+          patient_id, plan_id, exercise_id, session_date,
+          actual_reps_left, actual_reps_right, actual_reps,
+          actual_sets, accuracy_percent, duration_seconds, notes
+        ) VALUES (?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
+        [patientId, plan_id, resolvedExerciseId, safeLeft, safeRight, safeActualReps, safeAccuracy, safeDuration, notes]
+      );
+      console.log('✅ INSERT พร้อม plan_id:', plan_id);
+    } else {
+      // plan_id = NULL → INSERT โดยไม่ระบุ plan_id
+      // ⚠️ ต้องให้ column plan_id เป็น NULLABLE: ALTER TABLE Exercise_Sessions MODIFY plan_id INT NULL;
+      [result] = await connection.execute(
+        `INSERT INTO Exercise_Sessions (
+          patient_id, exercise_id, session_date,
+          actual_reps_left, actual_reps_right, actual_reps,
+          actual_sets, accuracy_percent, duration_seconds, notes
+        ) VALUES (?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
+        [patientId, resolvedExerciseId, safeLeft, safeRight, safeActualReps, safeAccuracy, safeDuration, notes]
+      );
+      console.log('⚠️ INSERT โดยไม่มี plan_id (plan_id = NULL)');
+    }
 
     console.log('✅ บันทึกสำเร็จ session_id:', result.insertId);
 
