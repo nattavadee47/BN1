@@ -1132,7 +1132,166 @@ app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
     if (connection) await connection.end();
   }
 });
+// ========================
+// GET /api/exercise-plans
+// ดึงแผนการฝึกล่าสุดที่นักกายภาพกำหนด
+// ========================
+app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
+  let connection;
+  try {
+    const userId = Number(req.user.user_id);
+    connection = await createConnection();
 
+    const [pRows] = await connection.execute(
+      'SELECT patient_id FROM Patients WHERE user_id = ? LIMIT 1', [userId]
+    );
+    if (!pRows || pRows.length === 0)
+      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้ป่วย' });
+
+    const patientId = Number(pRows[0].patient_id);
+
+    const [plans] = await connection.execute(
+      `SELECT ep.plan_id, ep.plan_name, ep.start_date, ep.end_date, ep.notes,
+              u.full_name as physio_name
+       FROM exerciseplans ep
+       LEFT JOIN Users u ON ep.physio_id = u.user_id
+       WHERE ep.patient_id = ?
+       ORDER BY ep.plan_id DESC LIMIT 1`,
+      [patientId]
+    );
+
+    // ไม่มีแผน → ส่ง default 3 ท่า
+    if (!plans || plans.length === 0) {
+      return res.json({
+        success: true, has_plan: false, plan: null,
+        exercises: [
+          { exercise_id: 1, name_th: 'ยกแขนไปข้างหน้า',  exercise_type: 'arm-raise-forward', icon: 'fa-hand-paper', sets: 3, reps_per_set: 10, color: 'orange-card' },
+          { exercise_id: 2, name_th: 'เหยียดเข่าตรง',     exercise_type: 'leg-extension',      icon: 'fa-walking',    sets: 3, reps_per_set: 10, color: 'blue-card'   },
+          { exercise_id: 3, name_th: 'โยกลำตัวซ้าย-ขวา', exercise_type: 'trunk-sway',         icon: 'fa-sync-alt',   sets: 3, reps_per_set: 10, color: 'pink-card'   }
+        ]
+      });
+    }
+
+    const plan = plans[0];
+    let exercises = [];
+
+    // ลอง PlanExercises ก่อน ถ้าไม่มี table → fallback session history
+    try {
+      const [planExs] = await connection.execute(
+        `SELECT pe.exercise_id, pe.sets, pe.reps_per_set,
+                e.name_th, e.name_en, e.exercise_type
+         FROM PlanExercises pe
+         JOIN Exercises e ON pe.exercise_id = e.exercise_id
+         WHERE pe.plan_id = ? ORDER BY pe.order_num ASC`,
+        [plan.plan_id]
+      );
+      exercises = planExs;
+    } catch (_) {
+      const [sessExs] = await connection.execute(
+        `SELECT DISTINCT es.exercise_id, e.name_th, e.name_en, e.exercise_type,
+                3 as sets, 10 as reps_per_set
+         FROM Exercise_Sessions es
+         JOIN Exercises e ON es.exercise_id = e.exercise_id
+         WHERE es.plan_id = ? ORDER BY es.exercise_id`,
+        [plan.plan_id]
+      ).catch(() => [[]]);
+      exercises = sessExs;
+    }
+
+    // ถ้าไม่มีท่า → default
+    if (!exercises || exercises.length === 0) {
+      exercises = [
+        { exercise_id: 1, name_th: 'ยกแขนไปข้างหน้า',  exercise_type: 'arm-raise-forward' },
+        { exercise_id: 2, name_th: 'เหยียดเข่าตรง',     exercise_type: 'leg-extension'      },
+        { exercise_id: 3, name_th: 'โยกลำตัวซ้าย-ขวา', exercise_type: 'trunk-sway'         }
+      ];
+    }
+
+    // map icon/color ตาม index และ type
+    const colorMap = ['orange-card','blue-card','pink-card','green-card','purple-card'];
+    const iconMap  = {
+      'arm-raise-forward': 'fa-hand-paper', 'arm': 'fa-hand-paper',
+      'leg-extension': 'fa-walking',        'leg': 'fa-walking',
+      'trunk-sway': 'fa-sync-alt',          'trunk': 'fa-sync-alt',
+      'balance': 'fa-balance-scale',        'default': 'fa-dumbbell'
+    };
+    exercises = exercises.map((ex, i) => ({
+      ...ex,
+      color: colorMap[i % colorMap.length],
+      icon: iconMap[ex.exercise_type] || iconMap['default'],
+      sets: ex.sets || 3,
+      reps_per_set: ex.reps_per_set || 10
+    }));
+
+    return res.json({
+      success: true, has_plan: true,
+      plan: {
+        plan_id:     plan.plan_id,
+        plan_name:   plan.plan_name,
+        physio_name: plan.physio_name || 'นักกายภาพบำบัด',
+        start_date:  plan.start_date,
+        end_date:    plan.end_date,
+        notes:       plan.notes
+      },
+      exercises
+    });
+
+  } catch (error) {
+    console.error('❌ Error exercise-plans:', error);
+    return res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด', error: error.message });
+  } finally {
+    if (connection) await connection.end();
+  }
+});
+
+// GET /api/today-progress — ดูว่าวันนี้ทำท่าไหนไปแล้วบ้าง
+app.get('/api/today-progress', authenticateToken, async (req, res) => {
+  let connection;
+  try {
+    const userId = Number(req.user.user_id);
+    connection = await createConnection();
+
+    const [pRows] = await connection.execute(
+      'SELECT patient_id FROM Patients WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    if (!pRows || pRows.length === 0)
+      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้ป่วย' });
+
+    const patientId = Number(pRows[0].patient_id);
+
+    // นับ session เป็น sets_done (1 session = 1 เซต)
+    const [todaySessions] = await connection.execute(
+      `SELECT es.exercise_id, e.name_th, e.exercise_type,
+              COUNT(*) as sets_done,
+              COALESCE(SUM(es.actual_sets), COUNT(*)) as sets_done_alt,
+              MAX(es.session_date) as last_done
+       FROM Exercise_Sessions es
+       LEFT JOIN Exercises e ON es.exercise_id = e.exercise_id
+       WHERE es.patient_id = ? AND DATE(es.session_date) = CURDATE()
+       GROUP BY es.exercise_id, e.name_th, e.exercise_type`,
+      [patientId]
+    );
+
+    return res.json({
+      success: true,
+      date: new Date().toISOString().split('T')[0],
+      completed_exercises: todaySessions.map(s => ({
+        exercise_id:   s.exercise_id,
+        name_th:       s.name_th,
+        exercise_type: s.exercise_type,
+        sets_done:     Number(s.sets_done_alt) || Number(s.sets_done) || 0,
+        last_done:     s.last_done
+      }))
+    });
+
+  } catch (error) {
+    console.error('❌ Error today-progress:', error);
+    return res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด', error: error.message });
+  } finally {
+    if (connection) await connection.end();
+  }
+});
 // ========================
 // จัดการข้อผิดพลาด
 // ========================
