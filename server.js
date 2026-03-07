@@ -1133,9 +1133,8 @@ app.get('/api/exercise-stats', authenticateToken, async (req, res) => {
   }
 });
 // ========================
-// GET /api/exercise-plans
 // ดึงแผนการฝึกล่าสุดที่นักกายภาพกำหนด
-// ========================
+// GET /api/exercise-plans
 app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
   let connection;
   try {
@@ -1150,77 +1149,72 @@ app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
 
     const patientId = Number(pRows[0].patient_id);
 
+    // ดึงแผนล่าสุด — ใช้ชื่อตารางตรงกับ DB จริง: ExercisePlans
     const [plans] = await connection.execute(
       `SELECT ep.plan_id, ep.plan_name, ep.start_date, ep.end_date, ep.notes,
               u.full_name as physio_name
-       FROM exerciseplans ep
+       FROM ExercisePlans ep
        LEFT JOIN Users u ON ep.physio_id = u.user_id
        WHERE ep.patient_id = ?
        ORDER BY ep.plan_id DESC LIMIT 1`,
       [patientId]
     );
 
-    // ไม่มีแผน → ส่ง default 3 ท่า
     if (!plans || plans.length === 0) {
       return res.json({
         success: true, has_plan: false, plan: null,
         exercises: [
-          { exercise_id: 1, name_th: 'ยกแขนไปข้างหน้า',  exercise_type: 'arm-raise-forward', icon: 'fa-hand-paper', sets: 3, reps_per_set: 10, color: 'orange-card' },
-          { exercise_id: 2, name_th: 'เหยียดเข่าตรง',     exercise_type: 'leg-extension',      icon: 'fa-walking',    sets: 3, reps_per_set: 10, color: 'blue-card'   },
-          { exercise_id: 3, name_th: 'โยกลำตัวซ้าย-ขวา', exercise_type: 'trunk-sway',         icon: 'fa-sync-alt',   sets: 3, reps_per_set: 10, color: 'pink-card'   }
+          { exercise_id: 1, name_th: 'ยกแขนไปข้างหน้า',  exercise_type: 'arm-raise-forward', icon: 'fa-hand-paper', sets: 3, reps_per_set: 10, color: 'orange' },
+          { exercise_id: 2, name_th: 'เหยียดเข่าตรง',     exercise_type: 'leg-extension',      icon: 'fa-walking',    sets: 3, reps_per_set: 10, color: 'green'  },
+          { exercise_id: 3, name_th: 'โยกลำตัวซ้าย-ขวา', exercise_type: 'trunk-sway',         icon: 'fa-sync-alt',   sets: 3, reps_per_set: 10, color: 'teal'   }
         ]
       });
     }
 
     const plan = plans[0];
-    let exercises = [];
 
-    // ลอง PlanExercises ก่อน ถ้าไม่มี table → fallback session history
-    try {
-      const [planExs] = await connection.execute(
-        `SELECT pe.exercise_id, pe.sets, pe.reps_per_set,
-                e.name_th, e.name_en, e.exercise_type
-         FROM PlanExercises pe
-         JOIN Exercises e ON pe.exercise_id = e.exercise_id
-         WHERE pe.plan_id = ? ORDER BY pe.order_num ASC`,
-        [plan.plan_id]
-      );
-      exercises = planExs;
-    } catch (_) {
-      const [sessExs] = await connection.execute(
-        `SELECT DISTINCT es.exercise_id, e.name_th, e.name_en, e.exercise_type,
-                3 as sets, 10 as reps_per_set
-         FROM Exercise_Sessions es
-         JOIN Exercises e ON es.exercise_id = e.exercise_id
-         WHERE es.plan_id = ? ORDER BY es.exercise_id`,
-        [plan.plan_id]
-      ).catch(() => [[]]);
-      exercises = sessExs;
-    }
+    // ดึง exercises — ใช้ชื่อตาราง Plan_Exercises และ column target_sets/target_reps
+    const [planExs] = await connection.execute(
+      `SELECT pe.exercise_id,
+              pe.target_sets  AS sets,
+              pe.target_reps  AS reps_per_set,
+              e.name_th, e.name_en, e.exercise_type
+       FROM Plan_Exercises pe
+       JOIN Exercises e ON pe.exercise_id = e.exercise_id
+       WHERE pe.plan_id = ?
+       ORDER BY pe.plan_exercise_id ASC`,
+      [plan.plan_id]
+    );
 
-    // ถ้าไม่มีท่า → default
-    if (!exercises || exercises.length === 0) {
-      exercises = [
-        { exercise_id: 1, name_th: 'ยกแขนไปข้างหน้า',  exercise_type: 'arm-raise-forward' },
-        { exercise_id: 2, name_th: 'เหยียดเข่าตรง',     exercise_type: 'leg-extension'      },
-        { exercise_id: 3, name_th: 'โยกลำตัวซ้าย-ขวา', exercise_type: 'trunk-sway'         }
-      ];
-    }
+    let exercises = planExs && planExs.length > 0 ? planExs : [
+      { exercise_id: 1, name_th: 'ยกแขนไปข้างหน้า',  exercise_type: 'arm-raise-forward', sets: 3, reps_per_set: 10 },
+      { exercise_id: 2, name_th: 'เหยียดเข่าตรง',     exercise_type: 'leg-extension',      sets: 3, reps_per_set: 10 },
+      { exercise_id: 3, name_th: 'โยกลำตัวซ้าย-ขวา', exercise_type: 'trunk-sway',         sets: 3, reps_per_set: 10 }
+    ];
 
-    // map icon/color ตาม index และ type
-    const colorMap = ['orange-card','blue-card','pink-card','green-card','purple-card'];
-    const iconMap  = {
-      'arm-raise-forward': 'fa-hand-paper', 'arm': 'fa-hand-paper',
-      'leg-extension': 'fa-walking',        'leg': 'fa-walking',
-      'trunk-sway': 'fa-sync-alt',          'trunk': 'fa-sync-alt',
-      'balance': 'fa-balance-scale',        'default': 'fa-dumbbell'
+    const colorList = ['orange','green','teal','blue','purple','pink'];
+    const iconMap = {
+      'arm-raise-forward': 'fa-hand-paper', 'arm':     'fa-hand-paper',
+      'leg-extension':     'fa-walking',    'leg':     'fa-walking',
+      'trunk-sway':        'fa-sync-alt',   'trunk':   'fa-sync-alt',
+      'balance':           'fa-balance-scale',         'default': 'fa-dumbbell'
     };
+    function iconFromName(name) {
+      if (!name) return iconMap['default'];
+      const n = name.toLowerCase();
+      if (n.includes('แขน') || n.includes('ยก') || n.includes('มือ')) return 'fa-hand-paper';
+      if (n.includes('เข่า') || n.includes('ขา') || n.includes('เหยียด')) return 'fa-walking';
+      if (n.includes('ลำตัว') || n.includes('โยก') || n.includes('หมุน')) return 'fa-sync-alt';
+      if (n.includes('สมดุล') || n.includes('ทรงตัว')) return 'fa-balance-scale';
+      return iconMap['default'];
+    }
+
     exercises = exercises.map((ex, i) => ({
       ...ex,
-      color: colorMap[i % colorMap.length],
-      icon: iconMap[ex.exercise_type] || iconMap['default'],
-      sets: ex.sets || 3,
-      reps_per_set: ex.reps_per_set || 10
+      sets:        Number(ex.sets)        || 3,
+      reps_per_set: Number(ex.reps_per_set) || 10,
+      color: colorList[i % colorList.length],
+      icon:  iconMap[ex.exercise_type] || iconFromName(ex.name_th)
     }));
 
     return res.json({
@@ -1243,7 +1237,6 @@ app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
     if (connection) await connection.end();
   }
 });
-
 // GET /api/today-progress — ดูว่าวันนี้ทำท่าไหนไปแล้วบ้าง
 app.get('/api/today-progress', authenticateToken, async (req, res) => {
   let connection;
