@@ -1148,17 +1148,38 @@ app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
       return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้ป่วย' });
 
     const patientId = Number(pRows[0].patient_id);
+    console.log('🔍 patient_id:', patientId);
 
-    // ดึงแผนล่าสุด — ใช้ชื่อตารางตรงกับ DB จริง: ExercisePlans
-    const [plans] = await connection.execute(
-      `SELECT ep.plan_id, ep.plan_name, ep.start_date, ep.end_date, ep.notes,
-              u.full_name as physio_name
-       FROM ExercisePlans ep
-       LEFT JOIN Users u ON ep.physio_id = u.user_id
-       WHERE ep.patient_id = ?
-       ORDER BY ep.plan_id DESC LIMIT 1`,
-      [patientId]
-    );
+    // ลองทั้ง ExercisePlans และ exerciseplans เพราะ TiDB อาจ case-sensitive
+    let plans = [];
+    try {
+      [plans] = await connection.execute(
+        `SELECT ep.plan_id, ep.plan_name, ep.start_date, ep.end_date, ep.notes,
+                u.full_name as physio_name
+         FROM ExercisePlans ep
+         LEFT JOIN Users u ON ep.physio_id = u.user_id
+         WHERE ep.patient_id = ?
+         ORDER BY ep.plan_id DESC LIMIT 1`,
+        [patientId]
+      );
+    } catch (e1) {
+      console.warn('⚠️ ExercisePlans ไม่ได้ ลอง exerciseplans:', e1.message);
+      try {
+        [plans] = await connection.execute(
+          `SELECT ep.plan_id, ep.plan_name, ep.start_date, ep.end_date, ep.notes,
+                  u.full_name as physio_name
+           FROM exerciseplans ep
+           LEFT JOIN Users u ON ep.physio_id = u.user_id
+           WHERE ep.patient_id = ?
+           ORDER BY ep.plan_id DESC LIMIT 1`,
+          [patientId]
+        );
+      } catch (e2) {
+        console.error('❌ ดึงแผนไม่ได้เลย:', e2.message);
+      }
+    }
+
+    console.log('🔍 plans found:', plans.length, plans[0]?.plan_id);
 
     if (!plans || plans.length === 0) {
       return res.json({
@@ -1173,18 +1194,25 @@ app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
 
     const plan = plans[0];
 
-    // ดึง exercises — ใช้ชื่อตาราง Plan_Exercises และ column target_sets/target_reps
-    const [planExs] = await connection.execute(
-      `SELECT pe.exercise_id,
-              pe.target_sets  AS sets,
-              pe.target_reps  AS reps_per_set,
-              e.name_th, e.name_en, e.exercise_type
-       FROM Plan_Exercises pe
-       JOIN Exercises e ON pe.exercise_id = e.exercise_id
-       WHERE pe.plan_id = ?
-       ORDER BY pe.plan_exercise_id ASC`,
-      [plan.plan_id]
-    );
+    // ดึง exercises จาก Plan_Exercises
+    let planExs = [];
+    try {
+      [planExs] = await connection.execute(
+        `SELECT pe.exercise_id,
+                pe.target_sets AS sets,
+                pe.target_reps AS reps_per_set,
+                e.name_th, e.name_en, e.exercise_type
+         FROM Plan_Exercises pe
+         JOIN Exercises e ON pe.exercise_id = e.exercise_id
+         WHERE pe.plan_id = ?
+         ORDER BY pe.plan_exercise_id ASC`,
+        [plan.plan_id]
+      );
+    } catch (e) {
+      console.error('❌ ดึง Plan_Exercises ไม่ได้:', e.message);
+    }
+
+    console.log('🔍 plan_id used:', plan.plan_id, '| exercises found:', planExs.length);
 
     let exercises = planExs && planExs.length > 0 ? planExs : [
       { exercise_id: 1, name_th: 'ยกแขนไปข้างหน้า',  exercise_type: 'arm-raise-forward', sets: 3, reps_per_set: 10 },
@@ -1194,10 +1222,10 @@ app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
 
     const colorList = ['orange','green','teal','blue','purple','pink'];
     const iconMap = {
-      'arm-raise-forward': 'fa-hand-paper', 'arm':     'fa-hand-paper',
-      'leg-extension':     'fa-walking',    'leg':     'fa-walking',
-      'trunk-sway':        'fa-sync-alt',   'trunk':   'fa-sync-alt',
-      'balance':           'fa-balance-scale',         'default': 'fa-dumbbell'
+      'arm-raise-forward': 'fa-hand-paper', 'arm':   'fa-hand-paper',
+      'leg-extension':     'fa-walking',    'leg':   'fa-walking',
+      'trunk-sway':        'fa-sync-alt',   'trunk': 'fa-sync-alt',
+      'balance': 'fa-balance-scale', 'default': 'fa-dumbbell'
     };
     function iconFromName(name) {
       if (!name) return iconMap['default'];
@@ -1211,7 +1239,7 @@ app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
 
     exercises = exercises.map((ex, i) => ({
       ...ex,
-      sets:        Number(ex.sets)        || 3,
+      sets:         Number(ex.sets)         || 3,
       reps_per_set: Number(ex.reps_per_set) || 10,
       color: colorList[i % colorList.length],
       icon:  iconMap[ex.exercise_type] || iconFromName(ex.name_th)
