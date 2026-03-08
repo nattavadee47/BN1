@@ -829,37 +829,47 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
     }
 
     // ----------------------------
-    // ✅ 2) Resolve exercise_id (ห้าม null)
+    // ✅ 2) Resolve exercise_id
+    //    ลำดับ: (a) id ที่ client ส่งมา (b) หาจาก plan ของผู้ป่วย (c) หาจากชื่อ/type
     // ----------------------------
-    let resolvedExerciseId = exercise_id ? Number(exercise_id) : null;
+    let resolvedExerciseId = (exercise_id && Number(exercise_id) > 0)
+      ? Number(exercise_id)
+      : null;
 
-    // ถ้า client ไม่ส่ง id มา ลองหาใน Exercises จากชื่อ
-    if (!resolvedExerciseId) {
-      const [found] = await connection.execute(
-        'SELECT exercise_id FROM Exercises WHERE name_th = ? OR name_en = ? LIMIT 1',
-        [exercise_name, exercise_name]
+    // (b) หา exercise_id จาก Plan_Exercises ของ patient — match ด้วย exercise_type หรือ name_en
+    if (!resolvedExerciseId && plan_id && exercise_type && exercise_type !== 'unknown') {
+      const [fromPlan] = await connection.execute(
+        `SELECT pe.exercise_id FROM Plan_Exercises pe
+         JOIN Exercises e ON pe.exercise_id = e.exercise_id
+         WHERE pe.plan_id = ?
+           AND (e.exercise_type = ? OR e.name_en = ? OR e.name_th = ?)
+         LIMIT 1`,
+        [plan_id, exercise_type, exercise_type, exercise_name]
       );
+      if (fromPlan.length > 0) {
+        resolvedExerciseId = Number(fromPlan[0].exercise_id);
+        console.log('✅ exercise_id จาก Plan_Exercises:', exercise_type, '→', resolvedExerciseId);
+      }
+    }
 
-      if (found.length > 0) {
-        resolvedExerciseId = Number(found[0].exercise_id);
-        console.log('✅ พบ exercise_id จาก Exercises:', resolvedExerciseId);
-      } else {
-        // ถ้าไม่เจอ สร้าง Exercises ใหม่
-        const [created] = await connection.execute(
-          `INSERT INTO Exercises (
-            name_th, name_en, description, angle_range, hold_time, repetitions, sets, rest_time
-          ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL)`,
-          [exercise_name, exercise_name, `AUTO-CREATED (${exercise_type})`]
-        );
-        resolvedExerciseId = created.insertId;
-        console.log('✅ สร้าง Exercises ใหม่ exercise_id:', resolvedExerciseId);
+    // (c) fallback: หาจากทุก Exercises
+    if (!resolvedExerciseId) {
+      const [byAny] = await connection.execute(
+        `SELECT exercise_id FROM Exercises
+         WHERE exercise_type = ? OR name_en = ? OR name_th = ?
+         LIMIT 1`,
+        [exercise_type, exercise_type, exercise_name]
+      );
+      if (byAny.length > 0) {
+        resolvedExerciseId = Number(byAny[0].exercise_id);
+        console.log('✅ exercise_id fallback จาก Exercises:', exercise_type, '→', resolvedExerciseId);
       }
     }
 
     if (!resolvedExerciseId) {
       return res.status(400).json({
         success: false,
-        message: 'exercise_id ไม่ถูกต้อง/ไม่สามารถสร้างได้',
+        message: `ไม่พบท่า "${exercise_name}" (${exercise_type}) ในฐานข้อมูล`,
       });
     }
 
@@ -1268,12 +1278,12 @@ app.get('/api/today-progress', authenticateToken, async (req, res) => {
 
     const patientId = Number(pRows[0].patient_id);
 
-    // นับ session เป็น sets_done (1 session = 1 เซต)
+    // นับ session วันนี้ — group ตาม exercise_id (ไม่ขึ้นกับ exercise_type column)
     const [todaySessions] = await connection.execute(
-      `SELECT es.exercise_id, e.name_th, e.exercise_type,
-              COUNT(*) as sets_done,
-              COALESCE(SUM(es.actual_sets), COUNT(*)) as sets_done_alt,
-              MAX(es.session_date) as last_done
+      `SELECT es.exercise_id,
+              e.name_th,
+              e.exercise_type,
+              COUNT(*) as sets_done
        FROM Exercise_Sessions es
        LEFT JOIN Exercises e ON es.exercise_id = e.exercise_id
        WHERE es.patient_id = ? AND DATE(es.session_date) = CURDATE()
@@ -1287,9 +1297,8 @@ app.get('/api/today-progress', authenticateToken, async (req, res) => {
       completed_exercises: todaySessions.map(s => ({
         exercise_id:   s.exercise_id,
         name_th:       s.name_th,
-        exercise_type: s.exercise_type,
-        sets_done:     Number(s.sets_done_alt) || Number(s.sets_done) || 0,
-        last_done:     s.last_done
+        exercise_type: s.exercise_type || '',
+        sets_done:     Number(s.sets_done) || 0,
       }))
     });
 
