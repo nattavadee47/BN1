@@ -792,7 +792,7 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
     try {
       // ค้นหา plan ที่มีอยู่แล้วของ patient นี้
       const [existingPlans] = await connection.execute(
-        'SELECT plan_id FROM exerciseplans WHERE patient_id = ? ORDER BY plan_id DESC LIMIT 1',
+        'SELECT plan_id FROM ExercisePlans WHERE patient_id = ? ORDER BY plan_id DESC LIMIT 1',
         [patientId]
       );
 
@@ -816,7 +816,7 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
         }
 
         const [newPlan] = await connection.execute(
-          `INSERT INTO exerciseplans (patient_id, physio_id, plan_name, start_date)
+          `INSERT INTO ExercisePlans (patient_id, physio_id, plan_name, start_date)
            VALUES (?, ?, 'แผนการฟื้นฟูอัตโนมัติ', CURRENT_DATE)`,
           [patientId, physioId]
         );
@@ -1150,7 +1150,7 @@ app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
     const patientId = Number(pRows[0].patient_id);
     console.log('🔍 patient_id:', patientId);
 
-    // ลองทั้ง ExercisePlans และ exerciseplans เพราะ TiDB อาจ case-sensitive
+    // ดึงแผนล่าสุดของผู้ป่วย
     let plans = [];
     try {
       [plans] = await connection.execute(
@@ -1163,20 +1163,7 @@ app.get('/api/exercise-plans', authenticateToken, async (req, res) => {
         [patientId]
       );
     } catch (e1) {
-      console.warn('⚠️ ExercisePlans ไม่ได้ ลอง exerciseplans:', e1.message);
-      try {
-        [plans] = await connection.execute(
-          `SELECT ep.plan_id, ep.plan_name, ep.start_date, ep.end_date, ep.notes,
-                  u.full_name as physio_name
-           FROM exerciseplans ep
-           LEFT JOIN Users u ON ep.physio_id = u.user_id
-           WHERE ep.patient_id = ?
-           ORDER BY ep.plan_id DESC LIMIT 1`,
-          [patientId]
-        );
-      } catch (e2) {
-        console.error('❌ ดึงแผนไม่ได้เลย:', e2.message);
-      }
+      console.error('❌ ดึงแผนไม่ได้:', e1.message);
     }
 
     console.log('🔍 plans found:', plans.length, plans[0]?.plan_id);
