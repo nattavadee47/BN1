@@ -739,6 +739,86 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
 });
 
 // ========================
+// 6. POST: บันทึกผลการฝึก
+// ========================
+app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
+  let connection;
+  try {
+    connection = await createConnection();
+    const userId = parseInt(req.user.user_id);
+
+    // ✅ map user_id → patient_id
+    const [pRows] = await connection.execute(
+      'SELECT patient_id FROM Patients WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+
+    if (!pRows || pRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'ไม่พบข้อมูลผู้ป่วย กรุณาลงทะเบียนผู้ป่วยก่อน'
+      });
+    }
+
+    const patientId = parseInt(pRows[0].patient_id);
+
+    // ✅ รับ field จาก potex.js
+    const {
+      exercise_id,
+      exercise_type,
+      actual_reps,
+      actual_sets,
+      accuracy,          // potex.js ส่งมาเป็น 'accuracy'
+      session_duration,  // potex.js ส่งมาเป็น 'session_duration'
+      left_count,
+      right_count,
+      exercise_name
+    } = req.body;
+
+    // ✅ หา plan_id ล่าสุดของผู้ป่วย (ถ้ามี)
+    const [planRows] = await connection.execute(
+      'SELECT plan_id FROM ExercisePlans WHERE patient_id = ? ORDER BY plan_id DESC LIMIT 1',
+      [patientId]
+    );
+    const planId = planRows.length > 0 ? parseInt(planRows[0].plan_id) : null;
+
+    await connection.execute(
+      `INSERT INTO Exercise_Sessions 
+        (patient_id, plan_id, exercise_id, session_date,
+         actual_reps_left, actual_reps_right, actual_reps, actual_sets,
+         accuracy_percent, duration_seconds, notes, completed, created_at)
+       VALUES (?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, 1, NOW())`,
+      [
+        patientId,
+        planId,
+        exercise_id   || null,
+        left_count    || 0,
+        right_count   || 0,
+        actual_reps   || 0,
+        actual_sets   || 1,
+        accuracy      || 0,
+        session_duration || 0,
+        exercise_name || exercise_type || 'ท่าการฝึก'
+      ]
+    );
+
+    console.log(`✅ บันทึกผลการฝึกสำเร็จ patient_id=${patientId} reps=${actual_reps} accuracy=${accuracy}%`);
+
+    res.json({ success: true, message: 'บันทึกผลการฝึกสำเร็จ' });
+
+  } catch (error) {
+    console.error('❌ Error saving session:', error);
+    res.status(500).json({
+      success: false,
+      message: 'เกิดข้อผิดพลาดในการบันทึกผล',
+      error: error.message
+    });
+  } finally {
+    if (connection) await connection.end();
+  }
+});
+
+// ========================
 // GET แผนการออกกำลังกายของผู้ป่วย (พร้อม target_reps, target_sets)
 // ========================
 app.get('/api/patients/:id/exercise-plans', authenticateToken, async (req, res) => {
