@@ -819,13 +819,29 @@ app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
 });
 
 // ========================
-// GET แผนการออกกำลังกายของผู้ป่วย (พร้อม target_reps, target_sets)
+// GET แผนการออกกำลังกายของผู้ป่วย
 // ========================
 app.get('/api/patients/:id/exercise-plans', authenticateToken, async (req, res) => {
   let connection;
   try {
-    connection = await mysql.createConnection(dbConfig);
-    const patientId = req.params.id;
+    // ✅ แก้: เปลี่ยนจาก mysql.createConnection(dbConfig) → createConnection()
+    connection = await createConnection();
+
+    let patientId = parseInt(req.params.id);
+
+    // ✅ แก้: dashboard ส่ง user_id มา ไม่ใช่ patient_id
+    // query หา patient_id จากทั้ง patient_id และ user_id
+    const [pRows] = await connection.execute(
+      'SELECT patient_id FROM Patients WHERE patient_id = ? OR user_id = ? LIMIT 1',
+      [patientId, patientId]
+    );
+
+    if (!pRows || pRows.length === 0) {
+      // ไม่พบผู้ป่วย → ส่ง empty array ไม่ใช่ 404
+      return res.json({ success: true, data: [] });
+    }
+
+    patientId = Number(pRows[0].patient_id);
 
     const [rows] = await connection.execute(
       `SELECT
@@ -853,7 +869,11 @@ app.get('/api/patients/:id/exercise-plans', authenticateToken, async (req, res) 
 
   } catch (error) {
     console.error('Error fetching exercise plans:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงแผนการออกกำลังกาย' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'เกิดข้อผิดพลาดในการดึงแผนการออกกำลังกาย',
+      error: error.message 
+    });
   } finally {
     if (connection) await connection.end();
   }
