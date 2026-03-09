@@ -275,8 +275,13 @@ app.post('/api/auth/login', async (req, res) => {
 
     connection = await createConnection();
     
+    // ✅ JOIN Patients เพื่อดึง patient_id มาพร้อมกันเลย
     const [users] = await connection.execute(
-      'SELECT user_id, phone, password_hash, full_name, role FROM Users WHERE phone = ?',
+      `SELECT u.user_id, u.phone, u.password_hash, u.full_name, u.role,
+              p.patient_id
+       FROM Users u
+       LEFT JOIN Patients p ON p.user_id = u.user_id
+       WHERE u.phone = ?`,
       [phone]
     );
 
@@ -318,12 +323,12 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    // ✅ สร้าง JWT Token พร้อม parseInt
+    // ✅ สร้าง JWT Token
     const token = jwt.sign(
       { 
-        user_id: parseInt(user.user_id), // ✅ ต้องมี parseInt
+        user_id: parseInt(user.user_id),
         phone: user.phone, 
-        role: user.role // ✅ ใช้ role จาก database ตรงๆ
+        role: user.role
       },
       JWT_SECRET,
       { expiresIn: '24h' }
@@ -340,17 +345,19 @@ app.post('/api/auth/login', async (req, res) => {
     console.log('✅ Login successful:', { 
       phone: user.phone, 
       role: user.role,
-      user_id: user.user_id 
+      user_id: user.user_id,
+      patient_id: user.patient_id  // ✅ log ด้วย
     });
 
     res.json({
       success: true,
       message: 'เข้าสู่ระบบสำเร็จ',
       user: {
-        user_id: parseInt(user.user_id), // ✅ ส่งเป็น number
-        phone: user.phone,
-        full_name: user.full_name,
-        role: user.role // ✅ ส่ง role ตรงจาก DB
+        user_id:    parseInt(user.user_id),
+        patient_id: user.patient_id ? parseInt(user.patient_id) : null,  // ✅ เพิ่ม
+        phone:      user.phone,
+        full_name:  user.full_name,
+        role:       user.role
       },
       token: token
     });
