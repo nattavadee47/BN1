@@ -732,206 +732,45 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
 });
 
 // ========================
-// 6. บันทึกผลการฝึก
+// GET แผนการออกกำลังกายของผู้ป่วย (พร้อม target_reps, target_sets)
 // ========================
-app.post('/api/exercise-sessions', authenticateToken, async (req, res) => {
+app.get('/api/patients/:id/exercise-plans', authenticateToken, async (req, res) => {
   let connection;
-
   try {
-    const userId = Number(req.user.user_id);
+    connection = await mysql.createConnection(dbConfig);
+    const patientId = req.params.id;
 
-    const {
-      exercise_id = null,
-      exercise_type = 'unknown',
-      exercise_name = 'ท่าการฝึก',
-      actual_reps = 0,
-      target_reps = 10, // เก็บไว้เฉย ๆ
-      accuracy = 0,
-      session_duration = 0,
-      left_count = 0,
-      right_count = 0,
-    } = req.body;
-
-    console.log('💾 บันทึกข้อมูลการฝึก:', {
-      userId,
-      exercise_id,
-      exercise_name,
-      exercise_type,
-      actual_reps,
-      left_count,
-      right_count,
-    });
-
-    connection = await createConnection();
-
-    // ----------------------------
-    // ✅ 0) map user_id -> Patients.patient_id  (สำคัญที่สุด แก้ FK)
-    // ----------------------------
-    const [pRows] = await connection.execute(
-      'SELECT patient_id FROM Patients WHERE user_id = ? LIMIT 1',
-      [userId]
+    const [rows] = await connection.execute(
+      `SELECT
+         ep.plan_id,
+         ep.plan_name,
+         ep.start_date,
+         ep.end_date,
+         ep.notes,
+         pe.plan_exercise_id,
+         pe.exercise_id,
+         pe.target_reps,
+         pe.target_sets,
+         e.name_th,
+         e.name_en,
+         e.description
+       FROM ExercisePlans ep
+       JOIN Plan_Exercises pe ON ep.plan_id = pe.plan_id
+       JOIN Exercises e       ON pe.exercise_id = e.exercise_id
+       WHERE ep.patient_id = ?
+       ORDER BY ep.plan_id DESC, pe.plan_exercise_id ASC`,
+      [patientId]
     );
 
-    if (!pRows || pRows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'ไม่พบ patient_id ในตาราง Patients สำหรับ user_id นี้ (ต้องมีข้อมูลผู้ป่วยก่อน)',
-      });
-    }
+    res.json({ success: true, data: rows });
 
-    const patientId = Number(pRows[0].patient_id);
-    console.log('✅ Resolved patientId:', patientId, 'from userId:', userId);
-
-    // ----------------------------
-    // ✅ 1) หา/สร้าง plan_id จากตาราง exerciseplans
-    //    Structure: plan_id(PK), patient_id(NOT NULL), physio_id(NOT NULL),
-    //               plan_name, start_date, end_date, notes
-    // ----------------------------
-    let plan_id = null;
-
-    try {
-      // ค้นหา plan ที่มีอยู่แล้วของ patient นี้
-      const [existingPlans] = await connection.execute(
-        'SELECT plan_id FROM exerciseplans WHERE patient_id = ? ORDER BY plan_id DESC LIMIT 1',
-        [patientId]
-      );
-
-      if (existingPlans.length > 0) {
-        plan_id = existingPlans[0].plan_id;
-        console.log('✅ ใช้ plan_id จาก exerciseplans:', plan_id);
-      } else {
-        // ต้องหา physio_id เพราะเป็น NOT NULL
-        // ดึง physio_id คนแรกที่มีในระบบ (default physio)
-        let physioId = 1;
-        try {
-          const [physios] = await connection.execute(
-            'SELECT physio_id FROM Physiotherapists ORDER BY physio_id ASC LIMIT 1'
-          );
-          if (physios.length > 0) {
-            physioId = physios[0].physio_id;
-            console.log('✅ ใช้ physio_id:', physioId);
-          }
-        } catch (e) {
-          console.warn('⚠️ หา physio_id ไม่ได้ ใช้ default = 1');
-        }
-
-        const [newPlan] = await connection.execute(
-          `INSERT INTO exerciseplans (patient_id, physio_id, plan_name, start_date)
-           VALUES (?, ?, 'แผนการฟื้นฟูอัตโนมัติ', CURRENT_DATE)`,
-          [patientId, physioId]
-        );
-        plan_id = newPlan.insertId;
-        console.log('✅ สร้าง plan_id ใหม่ใน exerciseplans:', plan_id);
-      }
-    } catch (planError) {
-      console.error('❌ หา/สร้าง plan_id ไม่สำเร็จ:', planError.message);
-      plan_id = null;
-    }
-
-    // ----------------------------
-    // ✅ 2) Resolve exercise_id (ห้าม null)
-    // ----------------------------
-    let resolvedExerciseId = exercise_id ? Number(exercise_id) : null;
-
-    // ถ้า client ไม่ส่ง id มา ลองหาใน Exercises จากชื่อ
-    if (!resolvedExerciseId) {
-      const [found] = await connection.execute(
-        'SELECT exercise_id FROM Exercises WHERE name_th = ? OR name_en = ? LIMIT 1',
-        [exercise_name, exercise_name]
-      );
-
-      if (found.length > 0) {
-        resolvedExerciseId = Number(found[0].exercise_id);
-        console.log('✅ พบ exercise_id จาก Exercises:', resolvedExerciseId);
-      } else {
-        // ถ้าไม่เจอ สร้าง Exercises ใหม่
-        const [created] = await connection.execute(
-          `INSERT INTO Exercises (
-            name_th, name_en, description, angle_range, hold_time, repetitions, sets, rest_time
-          ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL)`,
-          [exercise_name, exercise_name, `AUTO-CREATED (${exercise_type})`]
-        );
-        resolvedExerciseId = created.insertId;
-        console.log('✅ สร้าง Exercises ใหม่ exercise_id:', resolvedExerciseId);
-      }
-    }
-
-    if (!resolvedExerciseId) {
-      return res.status(400).json({
-        success: false,
-        message: 'exercise_id ไม่ถูกต้อง/ไม่สามารถสร้างได้',
-      });
-    }
-
-    // ----------------------------
-    // ✅ 3) INSERT Exercise_Sessions (ใช้ patientId!)
-    // ----------------------------
-    const safeActualReps = Number(actual_reps) || 0;
-    const safeLeft = Number(left_count) || 0;
-    const safeRight = Number(right_count) || 0;
-    const safeAccuracy = Number(accuracy) || 0;
-    const safeDuration = Number(session_duration) || 0;
-
-    const notes = `${exercise_name} - ซ้าย:${safeLeft} ขวา:${safeRight} รวม:${safeActualReps} ครั้งใน ${safeDuration} วินาที`;
-
-    // ✅ INSERT แบบ conditional: ถ้าหา plan_id ได้ใส่, ถ้าไม่ได้ข้าม (plan_id = NULL)
-    let result;
-    if (plan_id) {
-      [result] = await connection.execute(
-        `INSERT INTO Exercise_Sessions (
-          patient_id, plan_id, exercise_id, session_date,
-          actual_reps_left, actual_reps_right, actual_reps,
-          actual_sets, accuracy_percent, duration_seconds, notes
-        ) VALUES (?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
-        [patientId, plan_id, resolvedExerciseId, safeLeft, safeRight, safeActualReps, safeAccuracy, safeDuration, notes]
-      );
-      console.log('✅ INSERT พร้อม plan_id:', plan_id);
-    } else {
-      // plan_id = NULL → INSERT โดยไม่ระบุ plan_id
-      // ⚠️ ต้องให้ column plan_id เป็น NULLABLE: ALTER TABLE Exercise_Sessions MODIFY plan_id INT NULL;
-      [result] = await connection.execute(
-        `INSERT INTO Exercise_Sessions (
-          patient_id, exercise_id, session_date,
-          actual_reps_left, actual_reps_right, actual_reps,
-          actual_sets, accuracy_percent, duration_seconds, notes
-        ) VALUES (?, ?, NOW(), ?, ?, ?, 1, ?, ?, ?)`,
-        [patientId, resolvedExerciseId, safeLeft, safeRight, safeActualReps, safeAccuracy, safeDuration, notes]
-      );
-      console.log('⚠️ INSERT โดยไม่มี plan_id (plan_id = NULL)');
-    }
-
-    console.log('✅ บันทึกสำเร็จ session_id:', result.insertId);
-
-    return res.status(201).json({
-      success: true,
-      message: 'บันทึกข้อมูลการฝึกสำเร็จ',
-      data: {
-        session_id: result.insertId,
-        patient_id: patientId,
-        user_id: userId,
-        plan_id,
-        exercise_id: resolvedExerciseId,
-        exercise_name,
-        exercise_type,
-        actual_reps: safeActualReps,
-        left_count: safeLeft,
-        right_count: safeRight,
-        accuracy: safeAccuracy,
-        session_duration: safeDuration,
-      },
-    });
   } catch (error) {
-    console.error('❌ Error saving session:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล',
-      error: error.message,
-    });
+    console.error('Error fetching exercise plans:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงแผนการออกกำลังกาย' });
   } finally {
     if (connection) await connection.end();
   }
 });
-
 // ================================
 // 7.GET: ประวัติการออกกำลังกาย
 // ================================
